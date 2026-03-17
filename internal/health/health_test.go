@@ -1,6 +1,7 @@
 package health
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,7 +15,7 @@ func TestLivez(t *testing.T) {
 	s := NewStatus()
 	mux := s.Handler()
 
-	req := httptest.NewRequest(http.MethodGet, "/livez", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/livez", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -30,7 +31,7 @@ func TestReadyzUnhealthy(t *testing.T) {
 	s := NewStatus()
 	mux := s.Handler()
 
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -55,7 +56,7 @@ func TestReadyzHealthy(t *testing.T) {
 	s.SetLastCheckpointLSN(pglogrepl.LSN(0x100))
 
 	mux := s.Handler()
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
