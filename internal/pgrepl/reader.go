@@ -1,6 +1,6 @@
 // Package pgrepl manages the PostgreSQL logical replication connection,
 // WAL read loop, pgoutput message parsing, relation caching, and standby
-// status heartbeats.
+// status heartbeats. It reconnects automatically with exponential backoff.
 package pgrepl
 
 import (
@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -65,25 +66,71 @@ func NewReader(cfg ReaderConfig, handler MessageHandler, log zerolog.Logger, m *
 	}
 }
 
-// Run connects, optionally creates the replication slot, and enters the WAL
-// read loop. It blocks until ctx is cancelled or a fatal error occurs.
+// Run connects with automatic reconnect and enters the WAL read loop.
+// It blocks until ctx is cancelled or a non-recoverable error occurs.
+// Transient connection failures trigger exponential backoff reconnects.
 func (r *Reader) Run(ctx context.Context) error {
+	for {
+		err := r.runOnce(ctx)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Reconnect with exponential backoff.
+		r.metrics.ReconnectsTotal.Inc()
+		r.log.Warn().Err(err).Msg("replication connection lost; reconnecting")
+
+		bo := backoff.NewExponentialBackOff()
+		bo.InitialInterval = 500 * time.Millisecond
+		bo.MaxInterval = 30 * time.Second
+
+		_, reconnErr := backoff.Retry(ctx, func() (struct{}, error) {
+			if err := r.connectAndStart(ctx); err != nil {
+				r.log.Warn().Err(err).Msg("reconnect attempt failed")
+				return struct{}{}, err
+			}
+			return struct{}{}, nil
+		},
+			backoff.WithBackOff(bo),
+			backoff.WithMaxElapsedTime(0), // retry indefinitely until ctx cancelled
+		)
+
+		if reconnErr != nil {
+			return fmt.Errorf("pgrepl reconnect: %w", reconnErr)
+		}
+		r.log.Info().Msg("reconnected to PostgreSQL replication")
+	}
+}
+
+// runOnce performs a single connect → stream cycle. Returns on any error.
+func (r *Reader) runOnce(ctx context.Context) error {
+	if err := r.connectAndStart(ctx); err != nil {
+		return err
+	}
+	defer r.close()
+	return r.readLoop(ctx)
+}
+
+// connectAndStart establishes the connection, ensures the slot, and starts replication.
+func (r *Reader) connectAndStart(ctx context.Context) error {
+	r.close() // clean up any previous connection
+
 	if err := r.connect(ctx); err != nil {
 		return fmt.Errorf("pgrepl connect: %w", err)
 	}
-	defer r.close()
 
 	if r.cfg.CreateSlot {
 		if err := r.ensureSlot(ctx); err != nil {
+			r.close()
 			return fmt.Errorf("pgrepl ensure slot: %w", err)
 		}
 	}
 
 	if err := r.startReplication(ctx); err != nil {
+		r.close()
 		return fmt.Errorf("pgrepl start replication: %w", err)
 	}
-
-	return r.readLoop(ctx)
+	return nil
 }
 
 // LastLSN returns the last WAL LSN processed by the reader.
@@ -151,7 +198,7 @@ func (r *Reader) startReplication(ctx context.Context) error {
 	return nil
 }
 
-// readLoop processes WAL messages until the context is cancelled.
+// readLoop processes WAL messages until the context is cancelled or an error occurs.
 func (r *Reader) readLoop(ctx context.Context) error {
 	statusTicker := time.NewTicker(r.cfg.StatusInterval)
 	defer statusTicker.Stop()

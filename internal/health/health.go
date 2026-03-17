@@ -1,4 +1,4 @@
-// Package health exposes /live and /ready HTTP endpoints for Kubernetes probes.
+// Package health exposes /livez and /readyz HTTP endpoints for Kubernetes probes.
 package health
 
 import (
@@ -54,11 +54,11 @@ func (s *Status) SetLastCheckpointLSN(lsn pglogrepl.LSN) {
 	s.mu.Unlock()
 }
 
-// Handler returns an http.ServeMux with /live and /ready endpoints.
+// Handler returns an http.ServeMux with /livez and /readyz endpoints.
 func (s *Status) Handler() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/live", s.liveHandler)
-	mux.HandleFunc("/ready", s.readyHandler)
+	mux.HandleFunc("/livez", s.liveHandler)
+	mux.HandleFunc("/readyz", s.readyHandler)
 	return mux
 }
 

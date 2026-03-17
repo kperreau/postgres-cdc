@@ -1,0 +1,75 @@
+package health
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/jackc/pglogrepl"
+)
+
+func TestLivez(t *testing.T) {
+	s := NewStatus()
+	mux := s.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/livez", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("livez status = %d, want 200", w.Code)
+	}
+	if w.Body.String() != `{"live":true}` {
+		t.Errorf("livez body = %q", w.Body.String())
+	}
+}
+
+func TestReadyzUnhealthy(t *testing.T) {
+	s := NewStatus()
+	mux := s.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("readyz status = %d, want 503", w.Code)
+	}
+
+	var resp readyResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Ready {
+		t.Error("should not be ready when nothing is connected")
+	}
+}
+
+func TestReadyzHealthy(t *testing.T) {
+	s := NewStatus()
+	s.SetSourceConnected(true)
+	s.SetProducerHealthy(true)
+	s.SetLastReadLSN(pglogrepl.LSN(0x200))
+	s.SetLastCheckpointLSN(pglogrepl.LSN(0x100))
+
+	mux := s.Handler()
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("readyz status = %d, want 200", w.Code)
+	}
+
+	var resp readyResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Ready {
+		t.Error("should be ready")
+	}
+	if resp.LagBytes != 0x100 {
+		t.Errorf("lag = %d, want %d", resp.LagBytes, 0x100)
+	}
+}
