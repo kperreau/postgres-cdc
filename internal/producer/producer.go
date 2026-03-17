@@ -1,14 +1,19 @@
 // Package producer wraps the franz-go Kafka client for publishing CDC events
-// to Redpanda with batching, compression, retries, and bounded in-flight records.
+// to Redpanda with batching, compression, retries with exponential backoff,
+// and bounded in-flight records.
 package producer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/rs/zerolog"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/kperreau/postgres-cdc/internal/metrics"
@@ -23,16 +28,28 @@ type Config struct {
 	RequiredAcks    string
 	BatchMaxBytes   int
 	BatchMaxRecords int
+
+	// TopicAutoCreate controls automatic topic creation via the Kafka Admin API.
+	// When Partitions > 0, EnsureTopic will create topics that don't exist yet.
+	// ReplicationFactor defaults to 1 when unset.
+	TopicPartitions        int32
+	TopicReplicationFactor int16
 }
 
 // Producer wraps a franz-go client for CDC event publishing.
 type Producer struct {
 	client  *kgo.Client
+	admin   *kadm.Client
+	cfg     Config
 	log     zerolog.Logger
 	metrics *metrics.CDCMetrics
 
 	mu      sync.Mutex
 	healthy bool
+
+	// ensured tracks topic names that have already been created/verified,
+	// avoiding repeated admin RPCs for the same topic.
+	ensured sync.Map
 }
 
 // New creates and returns a connected Producer.
@@ -42,6 +59,7 @@ func New(ctx context.Context, cfg Config, log zerolog.Logger, m *metrics.CDCMetr
 		kgo.ProducerLinger(cfg.Linger),
 		kgo.MaxBufferedRecords(cfg.MaxInflight),
 		kgo.ProducerBatchMaxBytes(int32(cfg.BatchMaxBytes)),
+		kgo.DisableIdempotentWrite(),
 		kgo.MaxProduceRequestsInflightPerBroker(cfg.MaxInflight),
 	}
 
@@ -86,6 +104,8 @@ func New(ctx context.Context, cfg Config, log zerolog.Logger, m *metrics.CDCMetr
 
 	p := &Producer{
 		client:  client,
+		admin:   kadm.NewClient(client),
+		cfg:     cfg,
 		log:     log.With().Str("component", "producer").Logger(),
 		metrics: m,
 		healthy: true,
@@ -93,38 +113,83 @@ func New(ctx context.Context, cfg Config, log zerolog.Logger, m *metrics.CDCMetr
 	return p, nil
 }
 
-// PublishRecord publishes a single record synchronously and returns after ack.
-// It blocks until the record is acknowledged or the context is cancelled.
+// EnsureTopic creates the topic if it does not already exist. It is a no-op
+// when TopicPartitions is 0 (auto-create disabled) or after the first
+// successful call for a given topic name (result is cached in-process).
+func (p *Producer) EnsureTopic(ctx context.Context, topic string) error {
+	if p.cfg.TopicPartitions == 0 {
+		return nil
+	}
+	if _, ok := p.ensured.Load(topic); ok {
+		return nil
+	}
+
+	replFactor := p.cfg.TopicReplicationFactor
+	if replFactor == 0 {
+		replFactor = 1
+	}
+
+	resp, err := p.admin.CreateTopics(ctx, p.cfg.TopicPartitions, replFactor, nil, topic)
+	if err != nil {
+		return fmt.Errorf("ensure topic %q: %w", topic, err)
+	}
+	if tr, ok := resp[topic]; ok {
+		if tr.Err != nil && !errors.Is(tr.Err, kerr.TopicAlreadyExists) {
+			return fmt.Errorf("ensure topic %q: %w", topic, tr.Err)
+		}
+	}
+
+	p.ensured.Store(topic, struct{}{})
+	p.log.Debug().Str("topic", topic).Msg("topic ensured")
+	return nil
+}
+
+// PublishRecord publishes a single record synchronously with retry on transient
+// failures. It blocks until the record is acknowledged or the context is cancelled.
 func (p *Producer) PublishRecord(ctx context.Context, topic string, key, value []byte) error {
 	rec := &kgo.Record{
 		Topic: topic,
 		Key:   key,
 		Value: value,
 	}
-
-	result := p.client.ProduceSync(ctx, rec)
-	if err := result.FirstErr(); err != nil {
-		p.metrics.PublishFailuresTotal.Inc()
-		p.setHealthy(false)
-		return fmt.Errorf("producer: publish to %s: %w", topic, err)
-	}
-
-	p.setHealthy(true)
-	return nil
+	return p.publishWithRetry(ctx, []*kgo.Record{rec})
 }
 
-// PublishBatch publishes a slice of records synchronously. All records must be
-// acknowledged before this returns. On partial failure, the first error is returned.
+// PublishBatch publishes a slice of records synchronously with retry on transient
+// failures. All records must be acknowledged before this returns.
 func (p *Producer) PublishBatch(ctx context.Context, records []*kgo.Record) error {
-	results := p.client.ProduceSync(ctx, records...)
-	for _, r := range results {
-		if r.Err != nil {
-			p.metrics.PublishFailuresTotal.Inc()
-			p.setHealthy(false)
-			return fmt.Errorf("producer: batch publish: %w", r.Err)
+	return p.publishWithRetry(ctx, records)
+}
+
+// publishWithRetry wraps the publish call with exponential backoff. On transient
+// broker failures, it retries the entire batch. On context cancellation, it returns
+// immediately.
+func (p *Producer) publishWithRetry(ctx context.Context, records []*kgo.Record) error {
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 200 * time.Millisecond
+	bo.MaxInterval = 10 * time.Second
+
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
+		results := p.client.ProduceSync(ctx, records...)
+		for _, r := range results {
+			if r.Err != nil {
+				p.metrics.PublishRetriesTotal.Inc()
+				p.setHealthy(false)
+				p.log.Warn().Err(r.Err).Msg("publish failed; retrying")
+				return struct{}{}, r.Err
+			}
 		}
+		p.setHealthy(true)
+		return struct{}{}, nil
+	},
+		backoff.WithBackOff(bo),
+		backoff.WithMaxElapsedTime(0), // retry indefinitely until ctx cancelled
+	)
+
+	if err != nil {
+		p.metrics.PublishFailuresTotal.Inc()
+		return fmt.Errorf("producer: publish: %w", err)
 	}
-	p.setHealthy(true)
 	return nil
 }
 
