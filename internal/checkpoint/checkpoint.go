@@ -5,13 +5,13 @@ package checkpoint
 
 import (
 	"context"
-	"github.com/goccy/go-json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/goccy/go-json"
 	"github.com/jackc/pglogrepl"
 	"github.com/rs/zerolog"
 

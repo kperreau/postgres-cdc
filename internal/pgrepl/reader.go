@@ -27,6 +27,13 @@ type ReaderConfig struct {
 	CreateSlot      bool
 	StatusInterval  time.Duration
 	StartLSN        pglogrepl.LSN
+
+	// ConfirmedLSN returns the last safely checkpointed LSN. When set, the
+	// reader reports this value as WALFlushPosition in standby status updates,
+	// preventing PostgreSQL from recycling WAL segments that have not yet been
+	// durably checkpointed. If nil, the last-read LSN is used (less safe for
+	// WAL retention under high throughput).
+	ConfirmedLSN func() pglogrepl.LSN
 }
 
 // MessageHandler is called for each parsed WAL message.
@@ -408,12 +415,25 @@ func decodeColumnValue(col *pglogrepl.TupleDataColumn) any {
 	}
 }
 
-// sendStandbyStatus sends a standby status update to PostgreSQL,
-// confirming the last processed LSN.
+// sendStandbyStatus sends a standby status update to PostgreSQL.
+// WALFlushPosition reports the last durably checkpointed LSN (not merely the
+// last-read LSN) so that PostgreSQL does not recycle WAL segments before they
+// have been safely persisted. This is critical for correct crash recovery when
+// the checkpoint lags behind the read position.
 func (r *Reader) sendStandbyStatus(ctx context.Context) error {
+	// Use the checkpoint LSN for WALFlushPosition when available, so PG only
+	// advances confirmed_flush_lsn (and can only recycle WAL) up to what we've
+	// actually durably stored. Fall back to lastLSN if no callback is set.
+	flushLSN := r.lastLSN
+	if r.cfg.ConfirmedLSN != nil {
+		if confirmed := r.cfg.ConfirmedLSN(); confirmed > 0 {
+			flushLSN = confirmed
+		}
+	}
+
 	return pglogrepl.SendStandbyStatusUpdate(ctx, r.conn, pglogrepl.StandbyStatusUpdate{
-		WALWritePosition: r.lastLSN,
-		WALFlushPosition: r.lastLSN,
-		WALApplyPosition: r.lastLSN,
+		WALWritePosition: r.lastLSN,  // how far we've read
+		WALFlushPosition: flushLSN,   // how far we've durably checkpointed
+		WALApplyPosition: flushLSN,   // same as flush for our purposes
 	})
 }
