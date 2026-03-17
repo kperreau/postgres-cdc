@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kperreau/postgres-cdc/internal/model"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
+	"github.com/kperreau/postgres-cdc/internal/model"
 )
 
 // Config is the root configuration struct.
@@ -82,11 +82,11 @@ type SnapshotConfig struct {
 
 // RedpandaConfig holds Redpanda/Kafka producer settings.
 type RedpandaConfig struct {
-	Brokers      []string `koanf:"brokers"`
-	Compression  string   `koanf:"compression"`
+	Brokers      []string      `koanf:"brokers"`
+	Compression  string        `koanf:"compression"`
 	Linger       time.Duration `koanf:"linger"`
-	MaxInflight  int      `koanf:"max_inflight"`
-	RequiredAcks string   `koanf:"required_acks"`
+	MaxInflight  int           `koanf:"max_inflight"`
+	RequiredAcks string        `koanf:"required_acks"`
 }
 
 // TopicConfig holds topic routing settings.

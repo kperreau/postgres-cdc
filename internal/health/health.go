@@ -12,12 +12,12 @@ import (
 
 // Status holds the health state observed by pipeline components.
 type Status struct {
-	mu               sync.Mutex
-	sourceConnected  bool
-	producerHealthy  bool
-	lastReadLSN      pglogrepl.LSN
+	mu                sync.Mutex
+	sourceConnected   bool
+	producerHealthy   bool
+	lastReadLSN       pglogrepl.LSN
 	lastCheckpointLSN pglogrepl.LSN
-	lastReadTime     time.Time
+	lastReadTime      time.Time
 }
 
 // NewStatus returns a new Status with default (unhealthy) state.

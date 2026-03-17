@@ -29,15 +29,15 @@ type PGMetrics struct {
 
 // CDCMetrics covers the publish/pipeline side.
 type CDCMetrics struct {
-	EventsTotal         *prometheus.CounterVec
-	PublishRetriesTotal prometheus.Counter
+	EventsTotal          *prometheus.CounterVec
+	PublishRetriesTotal  prometheus.Counter
 	PublishFailuresTotal prometheus.Counter
-	QueueDepth          prometheus.Gauge
-	LastReadLSN         prometheus.Gauge
-	LastCheckpointLSN   prometheus.Gauge
-	CommitLagSeconds    prometheus.Gauge
-	BackpressureSeconds prometheus.Counter
-	OversizedTransTotal prometheus.Counter
+	QueueDepth           prometheus.Gauge
+	LastReadLSN          prometheus.Gauge
+	LastCheckpointLSN    prometheus.Gauge
+	CommitLagSeconds     prometheus.Gauge
+	BackpressureSeconds  prometheus.Counter
+	OversizedTransTotal  prometheus.Counter
 }
 
 // SnapshotMetrics covers snapshot progress.

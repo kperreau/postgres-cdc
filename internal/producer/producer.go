@@ -16,12 +16,12 @@ import (
 
 // Config holds producer settings.
 type Config struct {
-	Brokers        []string
-	Compression    string
-	Linger         time.Duration
-	MaxInflight    int
-	RequiredAcks   string
-	BatchMaxBytes  int
+	Brokers         []string
+	Compression     string
+	Linger          time.Duration
+	MaxInflight     int
+	RequiredAcks    string
+	BatchMaxBytes   int
 	BatchMaxRecords int
 }
 
