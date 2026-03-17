@@ -1,0 +1,39 @@
+{{- if and .Values.serviceAccount.create .Values.leaderElection.enabled }}
+---
+# Role: access to Lease objects for leader election.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "postgres-cdc.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgres-cdc.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: [{{ .Values.leaderElection.leaseName | quote }}]
+    verbs: ["get", "watch", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "list", "watch"]
+  # Events for leader election visibility.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "postgres-cdc.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgres-cdc.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "postgres-cdc.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "postgres-cdc.fullname" . }}-leader-election
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

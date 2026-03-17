@@ -1,0 +1,30 @@
+{{- if .Values.keda.enabled }}
+# ScaledObject managed by KEDA (https://keda.sh).
+# Uses a Prometheus trigger to monitor CDC commit lag.
+# maxReplicaCount is hard-capped at 1: multiple instances would conflict on the
+# PostgreSQL replication slot.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "postgres-cdc.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgres-cdc.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "postgres-cdc.fullname" . }}
+  minReplicaCount: {{ .Values.keda.minReplicaCount }}
+  maxReplicaCount: {{ .Values.keda.maxReplicaCount }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ .Values.keda.prometheus.serverAddress | quote }}
+        metricName: cdc_commit_lag_seconds
+        query: {{ .Values.keda.prometheus.query | quote }}
+        threshold: {{ .Values.keda.prometheus.threshold | quote }}
+        activationThreshold: {{ .Values.keda.prometheus.activationThreshold | quote }}
+{{- end }}
