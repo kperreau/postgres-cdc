@@ -1,0 +1,33 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - revive
+    - godot
+    - noctx
+
+formatters:
+  enable:
+    - gofumpt
+
+settings:
+  revive:
+    rules:
+      - name: exported
+        disabled: true
+
+  godot:
+    scope: declarations
+    capital: false
+
+exclusions:
+  rules:
+    - path: _test\.go
+      linters: [errcheck, godot]

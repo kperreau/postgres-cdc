@@ -11,11 +11,12 @@ import (
 // OpType represents a CDC operation type.
 type OpType byte
 
+// CDC operation types published in the envelope "op" field.
 const (
-	OpInsert   OpType = 'c'
-	OpUpdate   OpType = 'u'
-	OpDelete   OpType = 'd'
-	OpSnapshot OpType = 'r' // read (snapshot)
+	OpInsert   OpType = 'c' // insert
+	OpUpdate   OpType = 'u' // update
+	OpDelete   OpType = 'd' // delete
+	OpSnapshot OpType = 'r' // snapshot read
 )
 
 // String returns the single-character string representation.
@@ -101,7 +102,8 @@ type CDCEnvelope struct {
 // TopicMode determines how topics are resolved.
 type TopicMode string
 
+// Topic routing modes.
 const (
-	TopicPerTable TopicMode = "per_table"
-	TopicSingle   TopicMode = "single"
+	TopicPerTable TopicMode = "per_table" // one topic per table: {prefix}.{db}.{schema}.{table}
+	TopicSingle   TopicMode = "single"    // all events go to a single configured topic
 )

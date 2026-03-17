@@ -68,9 +68,10 @@ type ReplicationConfig struct {
 // SnapshotMode controls initial snapshot behavior.
 type SnapshotMode string
 
+// Snapshot modes.
 const (
-	SnapshotNever   SnapshotMode = "never"
-	SnapshotInitial SnapshotMode = "initial"
+	SnapshotNever   SnapshotMode = "never"   // skip initial snapshot
+	SnapshotInitial SnapshotMode = "initial" // run a full consistent snapshot before streaming
 )
 
 // SnapshotConfig holds snapshot settings.
