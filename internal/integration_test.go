@@ -181,6 +181,7 @@ func startPipeline(
 			PublicationName: testPub,
 			CreateSlot:      true,
 			StatusInterval:  2 * time.Second,
+			ConfirmedLSN:    cpMgr.LastFlushed,
 		},
 		prod, cpMgr, resolver, hs, m, testLogger(),
 	)
@@ -470,6 +471,7 @@ func TestIntegration_Backpressure(t *testing.T) {
 			PublicationName: testPub,
 			CreateSlot:      true,
 			StatusInterval:  2 * time.Second,
+			ConfirmedLSN:    cpMgr.LastFlushed,
 		},
 		prod, cpMgr, resolver, hs, m, log,
 	)

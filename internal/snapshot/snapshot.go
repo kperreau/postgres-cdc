@@ -150,6 +150,10 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 			}
 
 			topicName := r.resolver.Resolve(r.cfg.Database, schema, table)
+			if err := r.prod.EnsureTopic(ctx, topicName); err != nil {
+				rows.Close()
+				return fmt.Errorf("ensure topic: %w", err)
+			}
 			batchRecords = append(batchRecords, &kgo.Record{
 				Topic: topicName,
 				Key:   key,
