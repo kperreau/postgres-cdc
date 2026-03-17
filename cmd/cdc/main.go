@@ -145,6 +145,7 @@ func run() int {
 		CreateSlot:      cfg.Replication.CreateSlotIfMissing,
 		StatusInterval:  cfg.Replication.StatusInterval,
 		StartLSN:        startLSN,
+		ConfirmedLSN:    cpMgr.LastFlushed,
 	}
 
 	pipe := pipeline.New(
