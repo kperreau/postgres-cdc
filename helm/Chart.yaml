@@ -1,0 +1,18 @@
+apiVersion: v2
+name: postgres-cdc
+description: Production-grade PostgreSQL CDC → Redpanda/Kafka service
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - cdc
+  - postgresql
+  - kafka
+  - redpanda
+  - wal
+home: https://github.com/kperreau/postgres-cdc
+sources:
+  - https://github.com/kperreau/postgres-cdc
+maintainers:
+  - name: kperreau
+    url: https://github.com/kperreau

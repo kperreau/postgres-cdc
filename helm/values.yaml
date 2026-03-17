@@ -1,0 +1,183 @@
+# Default values for postgres-cdc.
+
+# -- Number of replicas. Keep at 1: only one instance may hold a replication slot.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/kperreau/postgres-cdc
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag. Defaults to Chart.appVersion.
+  tag: ""
+
+imagePullSecrets: []
+
+serviceAccount:
+  # -- Create a dedicated ServiceAccount.
+  create: true
+  # -- Annotations to add (e.g. for IRSA / Workload Identity).
+  annotations: {}
+  # -- Override the generated name.
+  name: ""
+
+# -- Annotations added to every pod.
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+  prometheus.io/path: "/metrics"
+
+# -- Labels added to every pod.
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# ── PostgreSQL ────────────────────────────────────────────────────────────────
+postgres:
+  host: ""          # required
+  port: 5432
+  user: cdc
+  dbname: app
+  # -- Name of an existing Secret containing 'password' key.
+  # If set, secrets.password is ignored.
+  existingSecret: ""
+  existingSecretKey: password
+
+# ── Redpanda / Kafka ──────────────────────────────────────────────────────────
+redpanda:
+  # -- List of broker addresses.
+  brokers: []
+  #   - redpanda:9092
+  compression: snappy     # none | snappy | lz4 | zstd | gzip
+  linger: 5ms
+  maxInflight: 5
+  requiredAcks: all       # all | leader | none
+  topicAutoCreate:
+    # -- Set > 0 to create topics via Admin API before first publish.
+    partitions: 3
+    replicationFactor: 1
+
+# ── Replication slot ──────────────────────────────────────────────────────────
+replication:
+  slotName: cdc_slot
+  publicationName: cdc_pub
+  createSlotIfMissing: true
+  statusInterval: 10s
+
+# ── Topic routing ─────────────────────────────────────────────────────────────
+topic:
+  mode: per_table          # per_table | single
+  prefix: cdc
+  singleTopicName: ""      # required when mode=single
+
+# ── Initial snapshot ──────────────────────────────────────────────────────────
+snapshot:
+  mode: never              # never | initial
+  fetchSize: 10000
+  tables: []
+  #   - public.users
+  #   - public.orders
+
+# ── Checkpoint ────────────────────────────────────────────────────────────────
+checkpoint:
+  flushInterval: 5s
+  # -- Mount path for the checkpoint file inside the container.
+  mountPath: /var/lib/cdc
+
+# ── Runtime tuning ────────────────────────────────────────────────────────────
+runtime:
+  queueCapacity: 4096
+  maxTxBytes: 67108864      # 64 MiB
+  shutdownTimeout: 30s
+  producerBatchMaxBytes: 1048576
+  producerBatchMaxRecords: 1000
+
+# ── Logging & Metrics ─────────────────────────────────────────────────────────
+logging:
+  level: info               # trace | debug | info | warn | error
+
+metrics:
+  enabled: true
+  namespace: cdc
+
+# ── Persistence (checkpoint file) ────────────────────────────────────────────
+persistence:
+  # -- Enable a PersistentVolumeClaim for the checkpoint directory.
+  # Without this, checkpoints are lost on pod restart (safe but slower recovery).
+  enabled: false
+  storageClass: ""          # "" = cluster default
+  accessMode: ReadWriteOnce
+  size: 128Mi
+  # -- Use a pre-existing PVC instead of creating one.
+  existingClaim: ""
+
+# ── Service ───────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  healthPort: 8080
+  metricsPort: 9090
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# ── Leader election (Kubernetes Lease for active/passive HA) ──────────────────
+leaderElection:
+  # -- Enable Kubernetes Lease-based leader election.
+  # Required when running multiple replicas (only one will stream at a time).
+  enabled: false
+  leaseName: postgres-cdc-leader
+  leaseDuration: 15s
+  renewDeadline: 10s
+  retryPeriod: 2s
+
+# ── KEDA ─────────────────────────────────────────────────────────────────────
+keda:
+  # -- Enable KEDA ScaledObject. Requires KEDA operator installed in cluster.
+  enabled: false
+  # -- Minimum replicas (0 = scale to zero when no lag detected).
+  minReplicaCount: 1
+  # -- Must stay at 1 to avoid replication slot conflicts.
+  maxReplicaCount: 1
+  pollingInterval: 30
+  cooldownPeriod: 300
+  # -- Prometheus scaler configuration.
+  prometheus:
+    serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
+    # -- Query returning commit lag in seconds. Scale up when > threshold.
+    query: cdc_commit_lag_seconds{namespace="{{ .Release.Namespace }}"}
+    threshold: "30"
+    # -- Scale to zero when lag has been 0 for cooldownPeriod seconds.
+    activationThreshold: "0"
+
+# ── Scheduling ────────────────────────────────────────────────────────────────
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# -- Extra environment variables injected into the container.
+extraEnv: []
+# - name: CDC_LOGGING__LEVEL
+#   value: debug
+
+# -- Extra volumes.
+extraVolumes: []
+
+# -- Extra volume mounts.
+extraVolumeMounts: []
