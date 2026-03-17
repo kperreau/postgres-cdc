@@ -2,10 +2,11 @@
 package health
 
 import (
-	"github.com/goccy/go-json"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/goccy/go-json"
 
 	"github.com/jackc/pglogrepl"
 )

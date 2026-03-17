@@ -185,7 +185,6 @@ func (p *Producer) publishWithRetry(ctx context.Context, records []*kgo.Record) 
 		backoff.WithBackOff(bo),
 		backoff.WithMaxElapsedTime(0), // retry indefinitely until ctx cancelled
 	)
-
 	if err != nil {
 		p.metrics.PublishFailuresTotal.Inc()
 		return fmt.Errorf("producer: publish: %w", err)
