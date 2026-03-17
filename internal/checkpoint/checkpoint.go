@@ -37,7 +37,7 @@ type FileStore struct {
 // The parent directory is created if it does not exist.
 func NewFileStore(path string) (*FileStore, error) {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("checkpoint: create dir %s: %w", dir, err)
 	}
 	return &FileStore{path: path}, nil
@@ -75,7 +75,7 @@ func (f *FileStore) Save(cp model.Checkpoint) error {
 	}
 
 	tmp := f.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0640); err != nil {
+	if err := os.WriteFile(tmp, data, 0o640); err != nil {
 		return fmt.Errorf("checkpoint: write tmp: %w", err)
 	}
 	if err := os.Rename(tmp, f.path); err != nil {

@@ -84,7 +84,7 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 	r.log.Info().Str("table", qualifiedName).Msg("starting table snapshot")
 
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel: pgx.RepeatableRead,
+		IsoLevel:   pgx.RepeatableRead,
 		AccessMode: pgx.ReadOnly,
 	})
 	if err != nil {
