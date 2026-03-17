@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "postgres-cdc.configmapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgres-cdc.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    postgres:
+      host: {{ required "postgres.host is required" .Values.postgres.host | quote }}
+      port: {{ .Values.postgres.port }}
+      user: {{ .Values.postgres.user | quote }}
+      dbname: {{ .Values.postgres.dbname | quote }}
+
+    replication:
+      slot_name: {{ .Values.replication.slotName | quote }}
+      publication_name: {{ .Values.replication.publicationName | quote }}
+      create_slot_if_missing: {{ .Values.replication.createSlotIfMissing }}
+      status_interval: {{ .Values.replication.statusInterval | quote }}
+
+    snapshot:
+      mode: {{ .Values.snapshot.mode | quote }}
+      fetch_size: {{ .Values.snapshot.fetchSize }}
+      tables:
+        {{- if .Values.snapshot.tables }}
+        {{- range .Values.snapshot.tables }}
+        - {{ . | quote }}
+        {{- end }}
+        {{- else }}
+        []
+        {{- end }}
+
+    redpanda:
+      brokers:
+        {{- if .Values.redpanda.brokers }}
+        {{- range .Values.redpanda.brokers }}
+        - {{ . | quote }}
+        {{- end }}
+        {{- else }}
+        []
+        {{- end }}
+      compression: {{ .Values.redpanda.compression | quote }}
+      linger: {{ .Values.redpanda.linger | quote }}
+      max_inflight: {{ .Values.redpanda.maxInflight }}
+      required_acks: {{ .Values.redpanda.requiredAcks | quote }}
+      topic_auto_create:
+        partitions: {{ .Values.redpanda.topicAutoCreate.partitions }}
+        replication_factor: {{ .Values.redpanda.topicAutoCreate.replicationFactor }}
+
+    topic:
+      mode: {{ .Values.topic.mode | quote }}
+      prefix: {{ .Values.topic.prefix | quote }}
+      {{- if .Values.topic.singleTopicName }}
+      single_topic_name: {{ .Values.topic.singleTopicName | quote }}
+      {{- end }}
+
+    checkpoint:
+      backend: file
+      file_path: {{ printf "%s/checkpoint.json" .Values.checkpoint.mountPath | quote }}
+      flush_interval: {{ .Values.checkpoint.flushInterval | quote }}
+
+    runtime:
+      queue_capacity: {{ .Values.runtime.queueCapacity }}
+      max_tx_bytes: {{ .Values.runtime.maxTxBytes }}
+      shutdown_timeout: {{ .Values.runtime.shutdownTimeout | quote }}
+
+    logging:
+      level: {{ .Values.logging.level | quote }}
+
+    metrics:
+      enabled: {{ .Values.metrics.enabled }}
+      listen_addr: {{ printf ":%d" (int .Values.service.metricsPort) | quote }}
+      path: /metrics
+      namespace: {{ .Values.metrics.namespace | quote }}
+
+    health:
+      listen_addr: {{ printf ":%d" (int .Values.service.healthPort) | quote }}
+
+    tuning:
+      producer_batch_max_bytes: {{ .Values.runtime.producerBatchMaxBytes }}
+      producer_batch_max_records: {{ .Values.runtime.producerBatchMaxRecords }}
