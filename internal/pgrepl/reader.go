@@ -432,8 +432,8 @@ func (r *Reader) sendStandbyStatus(ctx context.Context) error {
 	}
 
 	return pglogrepl.SendStandbyStatusUpdate(ctx, r.conn, pglogrepl.StandbyStatusUpdate{
-		WALWritePosition: r.lastLSN,  // how far we've read
-		WALFlushPosition: flushLSN,   // how far we've durably checkpointed
-		WALApplyPosition: flushLSN,   // same as flush for our purposes
+		WALWritePosition: r.lastLSN, // how far we've read
+		WALFlushPosition: flushLSN,  // how far we've durably checkpointed
+		WALApplyPosition: flushLSN,  // same as flush for our purposes
 	})
 }

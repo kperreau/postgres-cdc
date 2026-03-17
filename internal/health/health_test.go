@@ -1,10 +1,11 @@
 package health
 
 import (
-	"github.com/goccy/go-json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/goccy/go-json"
 
 	"github.com/jackc/pglogrepl"
 )

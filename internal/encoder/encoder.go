@@ -4,10 +4,11 @@
 package encoder
 
 import (
-	"github.com/goccy/go-json"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/goccy/go-json"
 
 	"github.com/kperreau/postgres-cdc/internal/model"
 )
