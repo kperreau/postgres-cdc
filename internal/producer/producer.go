@@ -1,5 +1,6 @@
 // Package producer wraps the franz-go Kafka client for publishing CDC events
-// to Redpanda with batching, compression, retries, and bounded in-flight records.
+// to Redpanda with batching, compression, retries with exponential backoff,
+// and bounded in-flight records.
 package producer
 
 import (
@@ -8,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/rs/zerolog"
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -93,38 +95,52 @@ func New(ctx context.Context, cfg Config, log zerolog.Logger, m *metrics.CDCMetr
 	return p, nil
 }
 
-// PublishRecord publishes a single record synchronously and returns after ack.
-// It blocks until the record is acknowledged or the context is cancelled.
+// PublishRecord publishes a single record synchronously with retry on transient
+// failures. It blocks until the record is acknowledged or the context is cancelled.
 func (p *Producer) PublishRecord(ctx context.Context, topic string, key, value []byte) error {
 	rec := &kgo.Record{
 		Topic: topic,
 		Key:   key,
 		Value: value,
 	}
-
-	result := p.client.ProduceSync(ctx, rec)
-	if err := result.FirstErr(); err != nil {
-		p.metrics.PublishFailuresTotal.Inc()
-		p.setHealthy(false)
-		return fmt.Errorf("producer: publish to %s: %w", topic, err)
-	}
-
-	p.setHealthy(true)
-	return nil
+	return p.publishWithRetry(ctx, []*kgo.Record{rec})
 }
 
-// PublishBatch publishes a slice of records synchronously. All records must be
-// acknowledged before this returns. On partial failure, the first error is returned.
+// PublishBatch publishes a slice of records synchronously with retry on transient
+// failures. All records must be acknowledged before this returns.
 func (p *Producer) PublishBatch(ctx context.Context, records []*kgo.Record) error {
-	results := p.client.ProduceSync(ctx, records...)
-	for _, r := range results {
-		if r.Err != nil {
-			p.metrics.PublishFailuresTotal.Inc()
-			p.setHealthy(false)
-			return fmt.Errorf("producer: batch publish: %w", r.Err)
+	return p.publishWithRetry(ctx, records)
+}
+
+// publishWithRetry wraps the publish call with exponential backoff. On transient
+// broker failures, it retries the entire batch. On context cancellation, it returns
+// immediately.
+func (p *Producer) publishWithRetry(ctx context.Context, records []*kgo.Record) error {
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 200 * time.Millisecond
+	bo.MaxInterval = 10 * time.Second
+
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
+		results := p.client.ProduceSync(ctx, records...)
+		for _, r := range results {
+			if r.Err != nil {
+				p.metrics.PublishRetriesTotal.Inc()
+				p.setHealthy(false)
+				p.log.Warn().Err(r.Err).Msg("publish failed; retrying")
+				return struct{}{}, r.Err
+			}
 		}
+		p.setHealthy(true)
+		return struct{}{}, nil
+	},
+		backoff.WithBackOff(bo),
+		backoff.WithMaxElapsedTime(0), // retry indefinitely until ctx cancelled
+	)
+
+	if err != nil {
+		p.metrics.PublishFailuresTotal.Inc()
+		return fmt.Errorf("producer: publish: %w", err)
 	}
-	p.setHealthy(true)
 	return nil
 }
 
