@@ -1,0 +1,57 @@
+postgres:
+  host: localhost
+  port: 5432
+  user: cdc
+  password: changeme
+  dbname: app
+
+replication:
+  slot_name: cdc_slot
+  publication_name: cdc_pub
+  create_slot_if_missing: true
+  status_interval: 10s
+
+snapshot:
+  mode: never
+  fetch_size: 10000
+  tables: []
+
+redpanda:
+  brokers:
+    - localhost:9092
+  compression: snappy
+  linger: 5ms
+  max_inflight: 5
+  required_acks: all
+
+topic:
+  mode: per_table
+  prefix: cdc
+  # single_topic_name: cdc-all  # only used when mode=single
+
+checkpoint:
+  backend: file
+  file_path: /var/lib/cdc/checkpoint.json
+  flush_interval: 5s
+
+runtime:
+  queue_capacity: 4096
+  max_tx_bytes: 67108864    # 64 MiB
+  shutdown_timeout: 30s
+
+logging:
+  level: info
+
+metrics:
+  enabled: true
+  listen_addr: ":9090"
+  path: /metrics
+  namespace: cdc
+  subsystem: ""
+
+health:
+  listen_addr: ":8080"
+
+tuning:
+  producer_batch_max_bytes: 1048576    # 1 MiB
+  producer_batch_max_records: 1000
