@@ -1,4 +1,4 @@
-.PHONY: build test bench lint clean run update
+.PHONY: build test bench lint clean run update docker-build
 
 BINARY := cdc
 PKG := ./...
@@ -28,6 +28,9 @@ tidy:
 
 update:
 	@go get -u ./...
+
+docker-build:
+	@docker build -t postgres-cdc:latest .
 
 # Integration tests require Docker
 test-integration:

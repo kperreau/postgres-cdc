@@ -1,6 +1,6 @@
 postgres:
   host: localhost
-  port: 5432
+  port: 5433
   user: cdc
   password: changeme
   dbname: app
@@ -18,11 +18,16 @@ snapshot:
 
 redpanda:
   brokers:
-    - localhost:9092
+    - localhost:29092
   compression: snappy
   linger: 5ms
   max_inflight: 5
   required_acks: all
+  # topic_auto_create: create topics via the Kafka Admin API before first publish.
+  # Set partitions > 0 to enable. Topics already existing are left untouched.
+  topic_auto_create:
+    partitions: 3
+    replication_factor: 1
 
 topic:
   mode: per_table

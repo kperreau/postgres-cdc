@@ -174,6 +174,11 @@ func (p *Pipeline) publishTx(ctx context.Context, batch *model.TxBatch) error {
 		}
 
 		topicName := p.resolver.Resolve(p.cfg.Database, schema, table)
+
+		if err := p.producer.EnsureTopic(ctx, topicName); err != nil {
+			return fmt.Errorf("ensure topic: %w", err)
+		}
+
 		records = append(records, &kgo.Record{
 			Topic: topicName,
 			Key:   key,
@@ -191,7 +196,9 @@ func (p *Pipeline) publishTx(ctx context.Context, batch *model.TxBatch) error {
 	p.cpMgr.Confirm(batch.LSN)
 
 	p.metrics.CDC.LastReadLSN.Set(float64(uint64(batch.LSN)))
+	p.metrics.CDC.LastCheckpointLSN.Set(float64(uint64(batch.LSN)))
 	p.health.SetLastReadLSN(batch.LSN)
+	p.health.SetLastCheckpointLSN(batch.LSN)
 	p.health.SetProducerHealthy(true)
 
 	if lag := time.Since(batch.CommitTS).Seconds(); lag > 0 {

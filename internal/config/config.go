@@ -87,6 +87,14 @@ type RedpandaConfig struct {
 	Linger       time.Duration `koanf:"linger"`
 	MaxInflight  int           `koanf:"max_inflight"`
 	RequiredAcks string        `koanf:"required_acks"`
+
+	// TopicAutoCreate controls automatic topic creation via the Kafka Admin API.
+	// When Partitions > 0, topics are created before first publish if missing.
+	// ReplicationFactor defaults to 1 when unset.
+	TopicAutoCreate struct {
+		Partitions        int32 `koanf:"partitions"`
+		ReplicationFactor int16 `koanf:"replication_factor"`
+	} `koanf:"topic_auto_create"`
 }
 
 // TopicConfig holds topic routing settings.
