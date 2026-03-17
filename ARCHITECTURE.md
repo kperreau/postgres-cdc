@@ -28,7 +28,7 @@ replication slot in a Kubernetes environment.
           ┌────────────────────┼────────────────────┐
           ▼                    ▼                    ▼
    internal/config      internal/metrics     internal/health
-   YAML + env config    promauto registry    /live + /ready
+   YAML + env config    promauto registry    /livez + /readyz
                                │
                                ▼
 ┌──────────────────────────────────────────────────────────────────┐

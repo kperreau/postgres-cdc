@@ -14,7 +14,7 @@ Single binary. Linux/Kubernetes-first. At-least-once delivery.
 - **Crash recovery** — resume from last checkpointed LSN
 - **Initial snapshot** — consistent REPEATABLE READ snapshot with cursor-based fetching
 - **Prometheus metrics** — pull model, `/metrics` endpoint
-- **Health endpoints** — `/live` and `/ready` for Kubernetes probes
+- **Health endpoints** — `/livez` and `/readyz` for Kubernetes probes
 - **Active/passive HA** — one active instance per replication slot
 
 ## Quick Start
@@ -93,7 +93,7 @@ PostgreSQL → pgrepl → txbuffer → encoder → producer → Redpanda
 - Deploy as a single-replica Deployment or StatefulSet
 - One active instance per replication slot
 - For leader election, use Kubernetes Lease API
-- Health probes: liveness at `/live`, readiness at `/ready`
+- Health probes: liveness at `/livez`, readiness at `/readyz`
 - Metrics scraping at `:9090/metrics`
 
 ## Development

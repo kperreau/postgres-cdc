@@ -3,6 +3,7 @@ module github.com/kperreau/postgres-cdc
 go 1.26.0
 
 require (
+	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/jackc/pglogrepl v0.0.0-20251213150135-2e8d0df862c1
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/knadh/koanf/parsers/yaml v1.1.0
