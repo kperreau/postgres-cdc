@@ -174,6 +174,11 @@ func (p *Pipeline) publishTx(ctx context.Context, batch *model.TxBatch) error {
 		}
 
 		topicName := p.resolver.Resolve(p.cfg.Database, schema, table)
+
+		if err := p.producer.EnsureTopic(ctx, topicName); err != nil {
+			return fmt.Errorf("ensure topic: %w", err)
+		}
+
 		records = append(records, &kgo.Record{
 			Topic: topicName,
 			Key:   key,

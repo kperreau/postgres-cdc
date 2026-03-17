@@ -5,12 +5,15 @@ package producer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/rs/zerolog"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/kperreau/postgres-cdc/internal/metrics"
@@ -25,16 +28,28 @@ type Config struct {
 	RequiredAcks    string
 	BatchMaxBytes   int
 	BatchMaxRecords int
+
+	// TopicAutoCreate controls automatic topic creation via the Kafka Admin API.
+	// When Partitions > 0, EnsureTopic will create topics that don't exist yet.
+	// ReplicationFactor defaults to 1 when unset.
+	TopicPartitions        int32
+	TopicReplicationFactor int16
 }
 
 // Producer wraps a franz-go client for CDC event publishing.
 type Producer struct {
 	client  *kgo.Client
+	admin   *kadm.Client
+	cfg     Config
 	log     zerolog.Logger
 	metrics *metrics.CDCMetrics
 
 	mu      sync.Mutex
 	healthy bool
+
+	// ensured tracks topic names that have already been created/verified,
+	// avoiding repeated admin RPCs for the same topic.
+	ensured sync.Map
 }
 
 // New creates and returns a connected Producer.
@@ -44,6 +59,7 @@ func New(ctx context.Context, cfg Config, log zerolog.Logger, m *metrics.CDCMetr
 		kgo.ProducerLinger(cfg.Linger),
 		kgo.MaxBufferedRecords(cfg.MaxInflight),
 		kgo.ProducerBatchMaxBytes(int32(cfg.BatchMaxBytes)),
+		kgo.DisableIdempotentWrite(),
 		kgo.MaxProduceRequestsInflightPerBroker(cfg.MaxInflight),
 	}
 
@@ -88,11 +104,44 @@ func New(ctx context.Context, cfg Config, log zerolog.Logger, m *metrics.CDCMetr
 
 	p := &Producer{
 		client:  client,
+		admin:   kadm.NewClient(client),
+		cfg:     cfg,
 		log:     log.With().Str("component", "producer").Logger(),
 		metrics: m,
 		healthy: true,
 	}
 	return p, nil
+}
+
+// EnsureTopic creates the topic if it does not already exist. It is a no-op
+// when TopicPartitions is 0 (auto-create disabled) or after the first
+// successful call for a given topic name (result is cached in-process).
+func (p *Producer) EnsureTopic(ctx context.Context, topic string) error {
+	if p.cfg.TopicPartitions == 0 {
+		return nil
+	}
+	if _, ok := p.ensured.Load(topic); ok {
+		return nil
+	}
+
+	replFactor := p.cfg.TopicReplicationFactor
+	if replFactor == 0 {
+		replFactor = 1
+	}
+
+	resp, err := p.admin.CreateTopics(ctx, p.cfg.TopicPartitions, replFactor, nil, topic)
+	if err != nil {
+		return fmt.Errorf("ensure topic %q: %w", topic, err)
+	}
+	if tr, ok := resp[topic]; ok {
+		if tr.Err != nil && !errors.Is(tr.Err, kerr.TopicAlreadyExists) {
+			return fmt.Errorf("ensure topic %q: %w", topic, tr.Err)
+		}
+	}
+
+	p.ensured.Store(topic, struct{}{})
+	p.log.Debug().Str("topic", topic).Msg("topic ensured")
+	return nil
 }
 
 // PublishRecord publishes a single record synchronously with retry on transient

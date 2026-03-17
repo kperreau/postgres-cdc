@@ -90,13 +90,15 @@ func run() int {
 
 	// --- Redpanda producer ---
 	prod, err := producer.New(ctx, producer.Config{
-		Brokers:         cfg.Redpanda.Brokers,
-		Compression:     cfg.Redpanda.Compression,
-		Linger:          cfg.Redpanda.Linger,
-		MaxInflight:     cfg.Redpanda.MaxInflight,
-		RequiredAcks:    cfg.Redpanda.RequiredAcks,
-		BatchMaxBytes:   cfg.Tuning.ProducerBatchMaxBytes,
-		BatchMaxRecords: cfg.Tuning.ProducerBatchMaxRecords,
+		Brokers:                cfg.Redpanda.Brokers,
+		Compression:            cfg.Redpanda.Compression,
+		Linger:                 cfg.Redpanda.Linger,
+		MaxInflight:            cfg.Redpanda.MaxInflight,
+		RequiredAcks:           cfg.Redpanda.RequiredAcks,
+		BatchMaxBytes:          cfg.Tuning.ProducerBatchMaxBytes,
+		BatchMaxRecords:        cfg.Tuning.ProducerBatchMaxRecords,
+		TopicPartitions:        cfg.Redpanda.TopicAutoCreate.Partitions,
+		TopicReplicationFactor: cfg.Redpanda.TopicAutoCreate.ReplicationFactor,
 	}, log, &m.CDC)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create producer")
