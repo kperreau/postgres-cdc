@@ -28,10 +28,9 @@ type Config struct {
 }
 
 // Encoder builds CDCEnvelope values and serializes them to JSON.
-// It is not safe for concurrent use; create one per goroutine or pipeline stage.
+// It is safe for concurrent use: all fields are read-only after construction.
 type Encoder struct {
 	cfg           Config
-	buf           []byte // reusable JSON marshal buffer
 	toastSentinel bool
 }
 
@@ -39,14 +38,13 @@ type Encoder struct {
 func New(cfg Config) *Encoder {
 	return &Encoder{
 		cfg:           cfg,
-		buf:           make([]byte, 0, 4096),
 		toastSentinel: cfg.ToastStrategy == "sentinel",
 	}
 }
 
 // Encode converts a TxEvent into a JSON-encoded CDCEnvelope.
 // It returns the topic-routing metadata, the deterministic key bytes,
-// and the value bytes. The returned slices are valid until the next Encode call.
+// and the value bytes.
 func (e *Encoder) Encode(ev *model.TxEvent, snapshot bool) (schema, table string, key, value []byte, err error) {
 	rel := ev.Change.Relation
 	if rel == nil {

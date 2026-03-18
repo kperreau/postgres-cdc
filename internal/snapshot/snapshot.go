@@ -7,7 +7,7 @@
 // unordered scanning.
 //
 // Multiple tables can be snapshotted concurrently via MaxParallelTables. Each
-// parallel table opens its own REPEATABLE READ transaction and encoder.
+// parallel table opens its own REPEATABLE READ transaction.
 package snapshot
 
 import (
@@ -45,6 +45,7 @@ type Runner struct {
 	pool     *pgxpool.Pool
 	prod     *producer.Producer
 	resolver *topic.Resolver
+	enc      *encoder.Encoder
 	log      zerolog.Logger
 	metrics  *metrics.SnapshotMetrics
 }
@@ -66,8 +67,13 @@ func NewRunner(
 		pool:     pool,
 		prod:     prod,
 		resolver: resolver,
-		log:      log.With().Str("component", "snapshot").Logger(),
-		metrics:  m,
+		enc: encoder.New(encoder.Config{
+			SourceName:    cfg.Source,
+			Database:      cfg.Database,
+			ToastStrategy: cfg.ToastStrategy,
+		}),
+		log:     log.With().Str("component", "snapshot").Logger(),
+		metrics: m,
 	}
 }
 
@@ -86,13 +92,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	for _, tbl := range r.cfg.Tables {
 		g.Go(func() error {
-			// Each goroutine gets its own encoder (not safe for concurrent use).
-			enc := encoder.New(encoder.Config{
-				SourceName:    r.cfg.Source,
-				Database:      r.cfg.Database,
-				ToastStrategy: r.cfg.ToastStrategy,
-			})
-			if err := r.snapshotTable(gCtx, tbl, enc); err != nil {
+			if err := r.snapshotTable(gCtx, tbl); err != nil {
 				return fmt.Errorf("snapshot %s: %w", tbl, err)
 			}
 			return nil
@@ -110,7 +110,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 // snapshotTable reads all rows from a single table in a consistent snapshot.
 // It detects primary key columns and uses ORDER BY pk for deterministic scanning.
-func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string, enc *encoder.Encoder) error {
+func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error {
 	schema, table := parseQualifiedName(qualifiedName)
 	r.log.Info().Str("table", qualifiedName).Msg("starting table snapshot")
 
@@ -183,7 +183,7 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string, enc *e
 				CommitTS: time.Now().UTC(),
 			}
 
-			_, _, key, value, err := enc.Encode(ev, true)
+			_, _, key, value, err := r.enc.Encode(ev, true)
 			if err != nil {
 				rows.Close()
 				return fmt.Errorf("encode: %w", err)

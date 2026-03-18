@@ -11,7 +11,6 @@ package pipeline
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -47,15 +46,15 @@ type Config struct {
 
 // Pipeline coordinates the CDC stages.
 type Pipeline struct {
-	cfg         Config
-	log         zerolog.Logger
-	metrics     *metrics.Metrics
-	health      *health.Status
-	producer    *producer.Producer
-	cpMgr       *checkpoint.Manager
-	resolver    *topic.Resolver
-	encoderPool sync.Pool
-	readerCfg   pgrepl.ReaderConfig
+	cfg       Config
+	log       zerolog.Logger
+	metrics   *metrics.Metrics
+	health    *health.Status
+	producer  *producer.Producer
+	cpMgr     *checkpoint.Manager
+	resolver  *topic.Resolver
+	enc       *encoder.Encoder
+	readerCfg pgrepl.ReaderConfig
 
 	// txCh carries assembled transactions from the buffer to the publish stage.
 	txCh chan *model.TxBatch
@@ -86,15 +85,11 @@ func New(
 		resolver:  resolver,
 		readerCfg: readerCfg,
 		txCh:      make(chan *model.TxBatch, cfg.QueueCapacity),
-	}
-	p.encoderPool = sync.Pool{
-		New: func() any {
-			return encoder.New(encoder.Config{
-				SourceName:    cfg.SourceName,
-				Database:      cfg.Database,
-				ToastStrategy: cfg.ToastStrategy,
-			})
-		},
+		enc: encoder.New(encoder.Config{
+			SourceName:    cfg.SourceName,
+			Database:      cfg.Database,
+			ToastStrategy: cfg.ToastStrategy,
+		}),
 	}
 	return p
 }
@@ -318,9 +313,6 @@ func (p *Pipeline) publishAndConfirm(ctx context.Context, batch *model.TxBatch) 
 // It does NOT confirm the checkpoint — the caller is responsible for that.
 // When TxMarkers is enabled, BEGIN/COMMIT marker records bracket the events.
 func (p *Pipeline) publishBatch(ctx context.Context, batch *model.TxBatch) error {
-	enc := p.encoderPool.Get().(*encoder.Encoder)
-	defer p.encoderPool.Put(enc)
-
 	// Extra capacity for optional tx markers.
 	recCap := len(batch.Events)
 	if p.cfg.TxMarkers {
@@ -333,7 +325,7 @@ func (p *Pipeline) publishBatch(ctx context.Context, batch *model.TxBatch) error
 
 	for i := range batch.Events {
 		ev := &batch.Events[i]
-		schema, table, key, value, err := enc.Encode(ev, false)
+		schema, table, key, value, err := p.enc.Encode(ev, false)
 		if err != nil {
 			return fmt.Errorf("encode event: %w", err)
 		}
