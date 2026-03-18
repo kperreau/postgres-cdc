@@ -52,7 +52,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: cdc
           POSTGRES_PASSWORD: changeme
@@ -66,7 +66,7 @@ jobs:
           --health-retries 10
 
       kafka:
-        image: bitnami/kafka
+        image: bitnamilegacy/kafka
         ports:
           - 19092:19092
         options: >-
