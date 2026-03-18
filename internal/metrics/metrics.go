@@ -38,6 +38,8 @@ type CDCMetrics struct {
 	CommitLagSeconds     prometheus.Gauge
 	BackpressureSeconds  prometheus.Counter
 	OversizedTransTotal  prometheus.Counter
+	InflightBatches      prometheus.Gauge
+	HeartbeatsTotal      prometheus.Counter
 }
 
 // SnapshotMetrics covers snapshot progress.
@@ -137,6 +139,16 @@ func newWithRegisterer(namespace string, factory promauto.Factory) *Metrics {
 				Namespace: namespace,
 				Name:      "cdc_oversized_transactions_total",
 				Help:      "Total transactions dropped/skipped due to exceeding max_tx_bytes.",
+			}),
+			InflightBatches: factory.NewGauge(prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "cdc_inflight_batches",
+				Help:      "Number of transaction batches currently in-flight (published but not yet checkpoint-confirmed).",
+			}),
+			HeartbeatsTotal: factory.NewCounter(prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "cdc_heartbeats_total",
+				Help:      "Total heartbeat records emitted.",
 			}),
 		},
 		Snapshot: SnapshotMetrics{

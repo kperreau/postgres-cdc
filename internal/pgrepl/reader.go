@@ -206,11 +206,15 @@ func (r *Reader) startReplication(ctx context.Context) error {
 }
 
 // readLoop processes WAL messages until the context is cancelled or an error occurs.
+// ReceiveMessage is called with a deadline equal to StatusInterval so the loop
+// cycles at least that often, ensuring timely standby status updates even when
+// no WAL messages arrive (e.g. quiet publication tables).
 func (r *Reader) readLoop(ctx context.Context) error {
 	statusTicker := time.NewTicker(r.cfg.StatusInterval)
 	defer statusTicker.Stop()
 
 	for {
+		// Process pending standby status updates.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -221,10 +225,17 @@ func (r *Reader) readLoop(ctx context.Context) error {
 		default:
 		}
 
-		rawMsg, err := r.conn.ReceiveMessage(ctx)
+		// Use a deadline so we cycle back for status ticks even when idle.
+		receiveCtx, receiveCancel := context.WithDeadline(ctx, time.Now().Add(r.cfg.StatusInterval))
+		rawMsg, err := r.conn.ReceiveMessage(receiveCtx)
+		receiveCancel()
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			// Receive timeout — not a real error, loop back for status tick.
+			if receiveCtx.Err() != nil {
+				continue
 			}
 			return fmt.Errorf("receive message: %w", err)
 		}

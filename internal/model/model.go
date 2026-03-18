@@ -95,8 +95,8 @@ type CDCEnvelope struct {
 	CommitTS string         `json:"commit_ts"` // RFC3339
 	Snapshot bool           `json:"snapshot"`
 	Key      map[string]any `json:"key"`
-	Before   map[string]any `json:"before,omitempty"`
-	After    map[string]any `json:"after,omitempty"`
+	Before   map[string]any `json:"before"`
+	After    map[string]any `json:"after"`
 }
 
 // TopicMode determines how topics are resolved.

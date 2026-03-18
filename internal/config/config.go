@@ -63,6 +63,12 @@ type ReplicationConfig struct {
 	PublicationName     string        `koanf:"publication_name"`
 	CreateSlotIfMissing bool          `koanf:"create_slot_if_missing"`
 	StatusInterval      time.Duration `koanf:"status_interval"`
+
+	// HeartbeatInterval controls how often a heartbeat record is emitted to
+	// the heartbeat topic. Set to 0 to disable heartbeats. When enabled, the
+	// connector publishes a lightweight record containing source, timestamp,
+	// and current LSN so downstream consumers can detect liveness and lag.
+	HeartbeatInterval time.Duration `koanf:"heartbeat_interval"`
 }
 
 // SnapshotMode controls initial snapshot behavior.
@@ -117,6 +123,14 @@ type RuntimeConfig struct {
 	QueueCapacity   int           `koanf:"queue_capacity"`
 	MaxTxBytes      int           `koanf:"max_tx_bytes"`
 	ShutdownTimeout time.Duration `koanf:"shutdown_timeout"`
+
+	// CheckpointLimit controls the maximum number of transaction batches that
+	// may be in-flight (published but not yet checkpoint-confirmed) at any time.
+	// The checkpoint LSN is only advanced when all prior batches in the ordered
+	// sequence have been fully acknowledged, preserving at-least-once semantics.
+	// Set to 1 for fully sequential publishing (default). Higher values enable
+	// bounded async publishing with higher throughput.
+	CheckpointLimit int `koanf:"checkpoint_limit"`
 }
 
 // LoggingConfig holds structured logging settings.
@@ -214,6 +228,7 @@ func DefaultConfig() *Config {
 			QueueCapacity:   4096,
 			MaxTxBytes:      64 * 1024 * 1024, // 64 MiB
 			ShutdownTimeout: 30 * time.Second,
+			CheckpointLimit: 1,
 		},
 		Logging: LoggingConfig{
 			Level: "info",
@@ -312,6 +327,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Runtime.ShutdownTimeout <= 0 {
 		errs = append(errs, errors.New("runtime: shutdown_timeout must be > 0"))
+	}
+	if c.Runtime.CheckpointLimit <= 0 {
+		errs = append(errs, errors.New("runtime: checkpoint_limit must be >= 1"))
+	}
+	if c.Replication.HeartbeatInterval < 0 {
+		errs = append(errs, errors.New("replication: heartbeat_interval must be >= 0"))
 	}
 
 	// Metrics

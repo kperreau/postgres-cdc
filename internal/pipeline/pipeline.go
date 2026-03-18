@@ -1,13 +1,21 @@
 // Package pipeline wires the CDC stages together: WAL reader → txbuffer →
 // encode → publish → checkpoint. All channels are bounded, backpressure
 // propagates upstream, and transaction ordering is preserved.
+//
+// When CheckpointLimit > 1, batches are published concurrently up to the
+// configured limit. The checkpoint LSN only advances when all prior batches
+// in the ordered sequence are fully acknowledged (contiguous ack window),
+// preserving at-least-once semantics without unbounded memory growth.
 package pipeline
 
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
+	"github.com/goccy/go-json"
+	"github.com/jackc/pglogrepl"
 	"github.com/rs/zerolog"
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -24,23 +32,28 @@ import (
 
 // Config holds pipeline configuration.
 type Config struct {
-	QueueCapacity int
-	MaxTxBytes    int
-	SourceName    string
-	Database      string
+	QueueCapacity   int
+	MaxTxBytes      int
+	CheckpointLimit int
+	SourceName      string
+	Database        string
+
+	// Heartbeat settings. HeartbeatInterval <= 0 disables heartbeat emission.
+	HeartbeatInterval time.Duration
+	HeartbeatTopic    string
 }
 
 // Pipeline coordinates the CDC stages.
 type Pipeline struct {
-	cfg       Config
-	log       zerolog.Logger
-	metrics   *metrics.Metrics
-	health    *health.Status
-	producer  *producer.Producer
-	cpMgr     *checkpoint.Manager
-	resolver  *topic.Resolver
-	encoder   *encoder.Encoder
-	readerCfg pgrepl.ReaderConfig
+	cfg         Config
+	log         zerolog.Logger
+	metrics     *metrics.Metrics
+	health      *health.Status
+	producer    *producer.Producer
+	cpMgr       *checkpoint.Manager
+	resolver    *topic.Resolver
+	encoderPool sync.Pool
+	readerCfg   pgrepl.ReaderConfig
 
 	// txCh carries assembled transactions from the buffer to the publish stage.
 	txCh chan *model.TxBatch
@@ -57,7 +70,11 @@ func New(
 	m *metrics.Metrics,
 	log zerolog.Logger,
 ) *Pipeline {
-	return &Pipeline{
+	if cfg.CheckpointLimit <= 0 {
+		cfg.CheckpointLimit = 1
+	}
+
+	p := &Pipeline{
 		cfg:       cfg,
 		log:       log.With().Str("component", "pipeline").Logger(),
 		metrics:   m,
@@ -65,10 +82,18 @@ func New(
 		producer:  prod,
 		cpMgr:     cpMgr,
 		resolver:  resolver,
-		encoder:   encoder.New(encoder.Config{SourceName: cfg.SourceName, Database: cfg.Database}),
 		readerCfg: readerCfg,
 		txCh:      make(chan *model.TxBatch, cfg.QueueCapacity),
 	}
+	p.encoderPool = sync.Pool{
+		New: func() any {
+			return encoder.New(encoder.Config{
+				SourceName: cfg.SourceName,
+				Database:   cfg.Database,
+			})
+		},
+	}
+	return p
 }
 
 // SetReaderConfig updates the reader config (used when wiring is two-phase).
@@ -111,27 +136,22 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		readerErrCh <- err
 	}()
 
-	// Publish loop: process transactions sequentially, preserving order.
-	for {
-		select {
-		case batch := <-p.txCh:
-			if err := p.publishTx(ctx, batch); err != nil {
-				cpCancel()
-				return fmt.Errorf("pipeline: publish: %w", err)
-			}
-		case err := <-readerErrCh:
-			cpCancel()
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return fmt.Errorf("pipeline: reader: %w", err)
-		case <-ctx.Done():
-			p.drainTxCh(ctx)
-			cpCancel()
-			<-cpErrCh
-			return ctx.Err()
-		}
+	// Start heartbeat emitter.
+	if p.cfg.HeartbeatInterval > 0 && p.cfg.HeartbeatTopic != "" {
+		go p.heartbeatLoop(ctx)
 	}
+
+	// Publish loop: sequential or async depending on checkpoint_limit.
+	var publishErr error
+	if p.cfg.CheckpointLimit > 1 {
+		publishErr = p.asyncPublishLoop(ctx, readerErrCh)
+	} else {
+		publishErr = p.sequentialPublishLoop(ctx, readerErrCh)
+	}
+
+	cpCancel()
+	<-cpErrCh
+	return publishErr
 }
 
 // enqueueTx returns the onTx callback for the txbuffer. It copies events
@@ -161,14 +181,147 @@ func (p *Pipeline) enqueueTx(ctx context.Context) func(*model.TxBatch) error {
 	}
 }
 
-// publishTx encodes and publishes all events in a transaction, then confirms
-// the checkpoint. The LSN is only confirmed after all records are acknowledged.
-func (p *Pipeline) publishTx(ctx context.Context, batch *model.TxBatch) error {
+// ---------- sequential publish loop (checkpoint_limit = 1) ----------
+
+// sequentialPublishLoop processes transactions one at a time, preserving order.
+func (p *Pipeline) sequentialPublishLoop(ctx context.Context, readerErrCh <-chan error) error {
+	for {
+		select {
+		case batch := <-p.txCh:
+			if err := p.publishAndConfirm(ctx, batch); err != nil {
+				return fmt.Errorf("pipeline: publish: %w", err)
+			}
+		case err := <-readerErrCh:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("pipeline: reader: %w", err)
+		case <-ctx.Done():
+			p.drainTxCh(ctx)
+			return ctx.Err()
+		}
+	}
+}
+
+// ---------- async publish loop (checkpoint_limit > 1) ----------
+
+// inflight tracks a single in-flight transaction batch.
+type inflight struct {
+	lsn  pglogrepl.LSN
+	ts   time.Time
+	done chan error
+}
+
+// asyncPublishLoop publishes up to CheckpointLimit batches concurrently.
+// Checkpoint advancement is contiguous: the advancer goroutine waits for
+// completions in order and only confirms each LSN after all prior LSNs
+// have been confirmed.
+func (p *Pipeline) asyncPublishLoop(ctx context.Context, readerErrCh <-chan error) error {
+	limit := p.cfg.CheckpointLimit
+	sem := make(chan struct{}, limit)
+	inflightCh := make(chan inflight, limit)
+
+	// Advancer goroutine: processes completions in order, advances checkpoint.
+	advancerDone := make(chan error, 1)
+	go func() {
+		for inf := range inflightCh {
+			if err := <-inf.done; err != nil {
+				advancerDone <- err
+				//nolint:revive // drain remaining entries so the channel can be GC'd.
+				for range inflightCh {
+				}
+				return
+			}
+			p.confirmCheckpoint(inf.lsn, inf.ts)
+			p.metrics.CDC.InflightBatches.Dec()
+		}
+		advancerDone <- nil
+	}()
+
+	publishCtx, publishCancel := context.WithCancel(ctx)
+	defer publishCancel()
+
+	var loopErr error
+loop:
+	for {
+		select {
+		case batch := <-p.txCh:
+			// Acquire semaphore slot (backpressure when window is full).
+			select {
+			case sem <- struct{}{}:
+			case <-publishCtx.Done():
+				loopErr = publishCtx.Err()
+				break loop
+			}
+
+			inf := inflight{
+				lsn:  batch.LSN,
+				ts:   batch.CommitTS,
+				done: make(chan error, 1),
+			}
+			inflightCh <- inf
+			p.metrics.CDC.InflightBatches.Inc()
+
+			go func(b *model.TxBatch, i inflight) {
+				defer func() { <-sem }()
+				i.done <- p.publishBatch(publishCtx, b)
+			}(batch, inf)
+
+		case err := <-readerErrCh:
+			if ctx.Err() != nil {
+				loopErr = ctx.Err()
+			} else {
+				loopErr = fmt.Errorf("pipeline: reader: %w", err)
+			}
+			break loop
+
+		case err := <-advancerDone:
+			loopErr = fmt.Errorf("pipeline: inflight: %w", err)
+			break loop
+
+		case <-ctx.Done():
+			loopErr = ctx.Err()
+			break loop
+		}
+	}
+
+	// Shutdown: cancel all in-flight publishes.
+	publishCancel()
+	close(inflightCh)
+
+	// Wait for all in-flight goroutines to release their semaphore slots.
+	for range limit {
+		sem <- struct{}{}
+	}
+
+	// Wait for advancer to finish processing.
+	<-advancerDone
+
+	return loopErr
+}
+
+// ---------- shared publish helpers ----------
+
+// publishAndConfirm encodes, publishes, and confirms the checkpoint (sequential mode).
+func (p *Pipeline) publishAndConfirm(ctx context.Context, batch *model.TxBatch) error {
+	if err := p.publishBatch(ctx, batch); err != nil {
+		return err
+	}
+	p.confirmCheckpoint(batch.LSN, batch.CommitTS)
+	return nil
+}
+
+// publishBatch encodes and publishes all events in a transaction batch.
+// It does NOT confirm the checkpoint — the caller is responsible for that.
+func (p *Pipeline) publishBatch(ctx context.Context, batch *model.TxBatch) error {
+	enc := p.encoderPool.Get().(*encoder.Encoder)
+	defer p.encoderPool.Put(enc)
+
 	records := make([]*kgo.Record, 0, len(batch.Events))
 
 	for i := range batch.Events {
 		ev := &batch.Events[i]
-		schema, table, key, value, err := p.encoder.Encode(ev, false)
+		schema, table, key, value, err := enc.Encode(ev, false)
 		if err != nil {
 			return fmt.Errorf("encode event: %w", err)
 		}
@@ -192,29 +345,89 @@ func (p *Pipeline) publishTx(ctx context.Context, batch *model.TxBatch) error {
 		return err
 	}
 
-	// Only after all records are acked do we confirm the checkpoint.
-	p.cpMgr.Confirm(batch.LSN)
-
+	// Update read-position metrics (these are safe from concurrent goroutines
+	// because Prometheus operations and health.Status are thread-safe).
 	p.metrics.CDC.LastReadLSN.Set(float64(uint64(batch.LSN)))
-	p.metrics.CDC.LastCheckpointLSN.Set(float64(uint64(batch.LSN)))
 	p.health.SetLastReadLSN(batch.LSN)
-	p.health.SetLastCheckpointLSN(batch.LSN)
 	p.health.SetProducerHealthy(true)
-
-	if lag := time.Since(batch.CommitTS).Seconds(); lag > 0 {
-		p.metrics.CDC.CommitLagSeconds.Set(lag)
-	}
 	p.metrics.CDC.QueueDepth.Set(float64(len(p.txCh)))
 
 	return nil
 }
+
+// confirmCheckpoint marks an LSN as safe and updates checkpoint metrics/health.
+func (p *Pipeline) confirmCheckpoint(lsn pglogrepl.LSN, commitTS time.Time) {
+	p.cpMgr.Confirm(lsn)
+	p.metrics.CDC.LastCheckpointLSN.Set(float64(uint64(lsn)))
+	p.health.SetLastCheckpointLSN(lsn)
+
+	if lag := time.Since(commitTS).Seconds(); lag > 0 {
+		p.metrics.CDC.CommitLagSeconds.Set(lag)
+	}
+}
+
+// ---------- heartbeat ----------
+
+// heartbeatRecord is the JSON structure emitted to the heartbeat topic.
+type heartbeatRecord struct {
+	Source    string `json:"source"`
+	Database  string `json:"database"`
+	Timestamp string `json:"timestamp"`
+	LSN       string `json:"lsn"`
+}
+
+// heartbeatLoop periodically emits a heartbeat record to the heartbeat topic.
+// It runs until ctx is cancelled and logs errors without stopping the pipeline.
+func (p *Pipeline) heartbeatLoop(ctx context.Context) {
+	ticker := time.NewTicker(p.cfg.HeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := p.emitHeartbeat(ctx); err != nil {
+				p.log.Warn().Err(err).Msg("heartbeat emit failed")
+			}
+		}
+	}
+}
+
+// emitHeartbeat publishes a single heartbeat record.
+func (p *Pipeline) emitHeartbeat(ctx context.Context) error {
+	hb := heartbeatRecord{
+		Source:    p.cfg.SourceName,
+		Database:  p.cfg.Database,
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		LSN:       p.cpMgr.LastFlushed().String(),
+	}
+	value, err := json.Marshal(&hb)
+	if err != nil {
+		return fmt.Errorf("marshal heartbeat: %w", err)
+	}
+
+	topic := p.cfg.HeartbeatTopic
+	if err := p.producer.EnsureTopic(ctx, topic); err != nil {
+		return fmt.Errorf("ensure heartbeat topic: %w", err)
+	}
+
+	if err := p.producer.PublishRecord(ctx, topic, nil, value); err != nil {
+		return fmt.Errorf("publish heartbeat: %w", err)
+	}
+
+	p.metrics.CDC.HeartbeatsTotal.Inc()
+	return nil
+}
+
+// ---------- drain ----------
 
 // drainTxCh processes remaining transactions in the channel during shutdown.
 func (p *Pipeline) drainTxCh(ctx context.Context) {
 	for {
 		select {
 		case batch := <-p.txCh:
-			if err := p.publishTx(ctx, batch); err != nil {
+			if err := p.publishAndConfirm(ctx, batch); err != nil {
 				p.log.Warn().Err(err).Msg("error publishing during drain")
 				return
 			}

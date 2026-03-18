@@ -18,6 +18,7 @@ data:
       publication_name: {{ .Values.replication.publicationName | quote }}
       create_slot_if_missing: {{ .Values.replication.createSlotIfMissing }}
       status_interval: {{ .Values.replication.statusInterval | quote }}
+      heartbeat_interval: {{ .Values.replication.heartbeatInterval | quote }}
 
     snapshot:
       mode: {{ .Values.snapshot.mode | quote }}
@@ -64,6 +65,7 @@ data:
       queue_capacity: {{ .Values.runtime.queueCapacity }}
       max_tx_bytes: {{ .Values.runtime.maxTxBytes }}
       shutdown_timeout: {{ .Values.runtime.shutdownTimeout | quote }}
+      checkpoint_limit: {{ .Values.runtime.checkpointLimit }}
 
     logging:
       level: {{ .Values.logging.level | quote }}
