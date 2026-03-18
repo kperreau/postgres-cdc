@@ -32,6 +32,12 @@ update:
 docker-build:
 	@docker build -t postgres-cdc:latest .
 
+up:
+	@docker compose -f docker-compose.yaml -p postgres-cdc up -d
+
+down:
+	@docker compose -f docker-compose.yaml -p postgres-cdc down
+
 # Integration tests require Docker
 test-integration:
 	@go test -race -tags=integration -count=1 $(PKG)
