@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/kperreau/postgres-cdc/internal/model"
 )
@@ -95,5 +96,76 @@ func TestPostgresConnString(t *testing.T) {
 	want := "host=db.local port=5433 user=app password=pw dbname=mydb"
 	if got != want {
 		t.Errorf("component mode:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestValidateInvalidToastStrategy(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultConfig()
+	cfg.Postgres.User = "test"
+	cfg.Topic.ToastStrategy = "invalid"
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for invalid toast_strategy")
+	}
+}
+
+func TestValidateValidToastStrategies(t *testing.T) {
+	t.Parallel()
+	for _, strategy := range []ToastStrategy{ToastOmit, ToastSentinel, ""} {
+		cfg := DefaultConfig()
+		cfg.Postgres.User = "test"
+		cfg.Topic.ToastStrategy = strategy
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("toast_strategy=%q should be valid: %v", strategy, err)
+		}
+	}
+}
+
+func TestValidateCheckpointLimitZero(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultConfig()
+	cfg.Postgres.User = "test"
+	cfg.Runtime.CheckpointLimit = 0
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for checkpoint_limit=0")
+	}
+}
+
+func TestValidateNegativeHeartbeat(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultConfig()
+	cfg.Postgres.User = "test"
+	cfg.Replication.HeartbeatInterval = -1 * time.Second
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for negative heartbeat_interval")
+	}
+}
+
+func TestValidateMaxParallelTablesZero(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultConfig()
+	cfg.Postgres.User = "test"
+	cfg.Snapshot.MaxParallelTables = 0
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for max_parallel_tables=0")
+	}
+}
+
+func TestDefaultConfigValues(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultConfig()
+
+	if cfg.Runtime.CheckpointLimit != 1 {
+		t.Errorf("CheckpointLimit = %d, want 1", cfg.Runtime.CheckpointLimit)
+	}
+	if cfg.Snapshot.MaxParallelTables != 1 {
+		t.Errorf("MaxParallelTables = %d, want 1", cfg.Snapshot.MaxParallelTables)
+	}
+	if cfg.Topic.ToastStrategy != ToastOmit {
+		t.Errorf("ToastStrategy = %q, want %q", cfg.Topic.ToastStrategy, ToastOmit)
 	}
 }

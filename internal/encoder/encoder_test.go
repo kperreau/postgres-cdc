@@ -1,6 +1,8 @@
 package encoder
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -197,6 +199,317 @@ func TestToastSentinelStrategy(t *testing.T) {
 	// TOAST columns should have the sentinel value.
 	if env.After["bio"] != ToastSentinelValue {
 		t.Errorf("sentinel strategy: after.bio = %v, want %q", env.After["bio"], ToastSentinelValue)
+	}
+}
+
+func TestEncodeUpdate(t *testing.T) {
+	t.Parallel()
+	enc := New(Config{SourceName: "pg-main", Database: "app"})
+	rel := &model.Relation{
+		ID: 1, Namespace: "public", Name: "users",
+		Columns: []model.Column{{Name: "id", IsKey: true}, {Name: "email"}},
+		KeyCols: []int{0},
+	}
+	ev := &model.TxEvent{
+		Change: model.Change{
+			Op:       model.OpUpdate,
+			Relation: rel,
+			Before: []model.ColumnValue{
+				{Name: "id", Value: "42"},
+				{Name: "email", Value: "old@example.com"},
+			},
+			After: []model.ColumnValue{
+				{Name: "id", Value: "42"},
+				{Name: "email", Value: "new@example.com"},
+			},
+			LSN: 0x300,
+		},
+		TxID:     789,
+		CommitTS: time.Date(2026, 3, 17, 15, 0, 0, 0, time.UTC),
+	}
+
+	_, _, _, value, err := enc.Encode(ev, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var env model.CDCEnvelope
+	if err := json.Unmarshal(value, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Op != "u" {
+		t.Errorf("op = %s, want u", env.Op)
+	}
+	if env.Before == nil {
+		t.Error("before should not be nil for update")
+	}
+	if env.After == nil {
+		t.Error("after should not be nil for update")
+	}
+	if env.Before["email"] != "old@example.com" {
+		t.Errorf("before.email = %v", env.Before["email"])
+	}
+	if env.After["email"] != "new@example.com" {
+		t.Errorf("after.email = %v", env.After["email"])
+	}
+}
+
+func TestEncodeSnapshot(t *testing.T) {
+	t.Parallel()
+	enc := New(Config{SourceName: "pg-main", Database: "app"})
+	rel := &model.Relation{
+		ID: 1, Namespace: "public", Name: "users",
+		Columns: []model.Column{{Name: "id", IsKey: true}},
+		KeyCols: []int{0},
+	}
+	ev := &model.TxEvent{
+		Change: model.Change{
+			Op:       model.OpSnapshot,
+			Relation: rel,
+			After:    []model.ColumnValue{{Name: "id", Value: "1"}},
+			LSN:      0x400,
+		},
+		TxID:     0,
+		CommitTS: time.Now(),
+	}
+
+	_, _, _, value, err := enc.Encode(ev, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var env model.CDCEnvelope
+	if err := json.Unmarshal(value, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Op != "r" {
+		t.Errorf("op = %s, want r", env.Op)
+	}
+	if !env.Snapshot {
+		t.Error("snapshot should be true")
+	}
+}
+
+func TestEncodeNilRelation(t *testing.T) {
+	t.Parallel()
+	enc := New(Config{SourceName: "pg-main", Database: "app"})
+	ev := &model.TxEvent{
+		Change: model.Change{
+			Op:       model.OpInsert,
+			Relation: nil,
+			After:    []model.ColumnValue{{Name: "id", Value: "1"}},
+			LSN:      0x500,
+		},
+		TxID:     1,
+		CommitTS: time.Now(),
+	}
+
+	schema, table, _, value, err := enc.Encode(ev, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schema != "unknown" {
+		t.Errorf("schema = %s, want unknown", schema)
+	}
+	if table != "unknown" {
+		t.Errorf("table = %s, want unknown", table)
+	}
+
+	var env model.CDCEnvelope
+	if err := json.Unmarshal(value, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Schema != "unknown" {
+		t.Errorf("env.Schema = %s, want unknown", env.Schema)
+	}
+	if env.Table != "unknown" {
+		t.Errorf("env.Table = %s, want unknown", env.Table)
+	}
+}
+
+func TestEncodeNoKeyColumns(t *testing.T) {
+	t.Parallel()
+	enc := New(Config{SourceName: "pg-main", Database: "app"})
+	rel := &model.Relation{
+		ID: 1, Namespace: "public", Name: "users",
+		Columns: []model.Column{{Name: "id"}, {Name: "email"}},
+		KeyCols: []int{}, // empty — no explicit key columns
+	}
+	ev := &model.TxEvent{
+		Change: model.Change{
+			Op:       model.OpInsert,
+			Relation: rel,
+			After: []model.ColumnValue{
+				{Name: "id", Value: "42"},
+				{Name: "email", Value: "test@example.com"},
+			},
+			LSN: 0x600,
+		},
+		TxID:     1,
+		CommitTS: time.Now(),
+	}
+
+	_, _, key, _, err := enc.Encode(ev, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var keyMap map[string]any
+	if err := json.Unmarshal(key, &keyMap); err != nil {
+		t.Fatal(err)
+	}
+	// All columns should be used as key fallback.
+	if len(keyMap) != 2 {
+		t.Errorf("key should have 2 entries (all columns), got %d", len(keyMap))
+	}
+	if keyMap["id"] != "42" {
+		t.Errorf("key[id] = %v", keyMap["id"])
+	}
+	if keyMap["email"] != "test@example.com" {
+		t.Errorf("key[email] = %v", keyMap["email"])
+	}
+}
+
+func TestEncodeDeleteNullAfter(t *testing.T) {
+	t.Parallel()
+	enc := New(Config{SourceName: "pg-main", Database: "app"})
+	rel := &model.Relation{
+		ID: 1, Namespace: "public", Name: "users",
+		Columns: []model.Column{{Name: "id", IsKey: true}, {Name: "email"}},
+		KeyCols: []int{0},
+	}
+	ev := &model.TxEvent{
+		Change: model.Change{
+			Op:       model.OpDelete,
+			Relation: rel,
+			Before: []model.ColumnValue{
+				{Name: "id", Value: "55"},
+				{Name: "email", Value: "del@example.com"},
+			},
+			// After is nil for deletes.
+			LSN: 0x700,
+		},
+		TxID:     2,
+		CommitTS: time.Now(),
+	}
+
+	_, _, key, _, err := enc.Encode(ev, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var keyMap map[string]any
+	if err := json.Unmarshal(key, &keyMap); err != nil {
+		t.Fatal(err)
+	}
+	if keyMap["id"] != "55" {
+		t.Errorf("delete key should be extracted from Before: id = %v", keyMap["id"])
+	}
+}
+
+func TestEncoderConcurrentSafety(t *testing.T) {
+	t.Parallel()
+	enc := New(Config{SourceName: "pg-main", Database: "app"})
+	rel := &model.Relation{
+		ID: 1, Namespace: "public", Name: "users",
+		Columns: []model.Column{{Name: "id", IsKey: true}},
+		KeyCols: []int{0},
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			ev := &model.TxEvent{
+				Change: model.Change{
+					Op:       model.OpInsert,
+					Relation: rel,
+					After:    []model.ColumnValue{{Name: "id", Value: fmt.Sprintf("%d", n)}},
+					LSN:      pglogrepl.LSN(n),
+				},
+				TxID:     uint32(n),
+				CommitTS: time.Now(),
+			}
+			_, _, _, _, err := enc.Encode(ev, false)
+			if err != nil {
+				t.Errorf("goroutine %d: %v", n, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestToastMixedColumns(t *testing.T) {
+	t.Parallel()
+	enc := New(Config{SourceName: "pg-main", Database: "app", ToastStrategy: "omit"})
+	ev := &model.TxEvent{
+		Change: model.Change{
+			Op: model.OpUpdate,
+			Relation: &model.Relation{
+				ID: 1, Namespace: "public", Name: "posts",
+				Columns: []model.Column{{Name: "id", IsKey: true}, {Name: "title"}, {Name: "body"}},
+				KeyCols: []int{0},
+			},
+			After: []model.ColumnValue{
+				{Name: "id", Value: "1"},
+				{Name: "title", Value: "Updated Title"},       // normal column
+				{Name: "body", Value: model.ToastUnchanged{}}, // TOAST unchanged
+			},
+			LSN: 0x800,
+		},
+		TxID: 1, CommitTS: time.Now(),
+	}
+
+	_, _, _, value, err := enc.Encode(ev, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var env model.CDCEnvelope
+	if err := json.Unmarshal(value, &env); err != nil {
+		t.Fatal(err)
+	}
+
+	// Normal column should be present.
+	if env.After["title"] != "Updated Title" {
+		t.Errorf("after.title = %v, want 'Updated Title'", env.After["title"])
+	}
+	// TOAST column should be omitted.
+	if _, ok := env.After["body"]; ok {
+		t.Error("omit strategy: after should not contain toast column 'body'")
+	}
+	// Non-toast columns should still be present.
+	if env.After["id"] != "1" {
+		t.Errorf("after.id = %v, want '1'", env.After["id"])
+	}
+}
+
+func TestColumnsToMapNil(t *testing.T) {
+	t.Parallel()
+	enc := New(Config{SourceName: "pg-main", Database: "app"})
+	result := enc.columnsToMap(nil)
+	if result != nil {
+		t.Errorf("expected nil for nil input, got %v", result)
+	}
+	result2 := enc.columnsToMap([]model.ColumnValue{})
+	if result2 != nil {
+		t.Errorf("expected nil for empty slice, got %v", result2)
+	}
+}
+
+func TestDeterministicKeyStringMultipleTypes(t *testing.T) {
+	t.Parallel()
+	key := map[string]any{
+		"name":   "alice",
+		"age":    float64(30),
+		"active": true,
+	}
+	got := DeterministicKeyString(key)
+	// Keys sorted: active, age, name. Values JSON-encoded.
+	want := `active=true|age=30|name="alice"`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
