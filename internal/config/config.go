@@ -64,6 +64,11 @@ type ReplicationConfig struct {
 	CreateSlotIfMissing bool          `koanf:"create_slot_if_missing"`
 	StatusInterval      time.Duration `koanf:"status_interval"`
 
+	// TemporarySlot creates a temporary replication slot that is automatically
+	// dropped when the connection ends. Useful for dev/test/CI environments.
+	// Persistent slots remain the default for production use.
+	TemporarySlot bool `koanf:"temporary_slot"`
+
 	// HeartbeatInterval controls how often a heartbeat record is emitted to
 	// the heartbeat topic. Set to 0 to disable heartbeats. When enabled, the
 	// connector publishes a lightweight record containing source, timestamp,
@@ -85,6 +90,11 @@ type SnapshotConfig struct {
 	Mode      SnapshotMode `koanf:"mode"`
 	FetchSize int          `koanf:"fetch_size"`
 	Tables    []string     `koanf:"tables"`
+
+	// MaxParallelTables controls how many tables are snapshotted concurrently.
+	// Each parallel snapshot opens its own REPEATABLE READ transaction.
+	// Set to 1 for sequential (default). Higher values trade DB load for speed.
+	MaxParallelTables int `koanf:"max_parallel_tables"`
 }
 
 // RedpandaConfig holds Redpanda/Kafka producer settings.
@@ -205,8 +215,9 @@ func DefaultConfig() *Config {
 			StatusInterval:      10 * time.Second,
 		},
 		Snapshot: SnapshotConfig{
-			Mode:      SnapshotNever,
-			FetchSize: 10000,
+			Mode:              SnapshotNever,
+			FetchSize:         10000,
+			MaxParallelTables: 1,
 		},
 		Redpanda: RedpandaConfig{
 			Brokers:      []string{"localhost:9092"},
@@ -278,6 +289,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Snapshot.FetchSize <= 0 {
 		errs = append(errs, errors.New("snapshot: fetch_size must be > 0"))
+	}
+	if c.Snapshot.MaxParallelTables <= 0 {
+		errs = append(errs, errors.New("snapshot: max_parallel_tables must be >= 1"))
 	}
 
 	// Redpanda

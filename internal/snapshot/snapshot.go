@@ -1,38 +1,47 @@
 // Package snapshot performs an initial consistent snapshot of configured tables
 // using a PostgreSQL transaction with REPEATABLE READ isolation. Snapshot rows
 // are emitted as CDC events with op='r' (read) through the same publish path.
+//
+// When primary key columns are detected, the cursor uses ORDER BY pk to ensure
+// deterministic, resumable scanning. Tables without a primary key fall back to
+// unordered scanning.
+//
+// Multiple tables can be snapshotted concurrently via MaxParallelTables. Each
+// parallel table opens its own REPEATABLE READ transaction and encoder.
 package snapshot
 
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/kperreau/postgres-cdc/internal/encoder"
 	"github.com/kperreau/postgres-cdc/internal/metrics"
 	"github.com/kperreau/postgres-cdc/internal/model"
 	"github.com/kperreau/postgres-cdc/internal/producer"
 	"github.com/kperreau/postgres-cdc/internal/topic"
-	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // Config holds snapshot settings.
 type Config struct {
-	Tables    []string // fully qualified: schema.table
-	FetchSize int
-	Database  string
-	Source    string
+	Tables            []string // fully qualified: schema.table
+	FetchSize         int
+	MaxParallelTables int
+	Database          string
+	Source            string
 }
 
 // Runner executes initial table snapshots.
 type Runner struct {
 	cfg      Config
 	pool     *pgxpool.Pool
-	enc      *encoder.Encoder
 	prod     *producer.Producer
 	resolver *topic.Resolver
 	log      zerolog.Logger
@@ -48,10 +57,12 @@ func NewRunner(
 	log zerolog.Logger,
 	m *metrics.SnapshotMetrics,
 ) *Runner {
+	if cfg.MaxParallelTables <= 0 {
+		cfg.MaxParallelTables = 1
+	}
 	return &Runner{
 		cfg:      cfg,
 		pool:     pool,
-		enc:      encoder.New(encoder.Config{SourceName: cfg.Source, Database: cfg.Database}),
 		prod:     prod,
 		resolver: resolver,
 		log:      log.With().Str("component", "snapshot").Logger(),
@@ -59,8 +70,8 @@ func NewRunner(
 	}
 }
 
-// Run executes snapshots for all configured tables sequentially.
-// Each table is snapshotted in a REPEATABLE READ transaction.
+// Run executes snapshots for all configured tables with bounded parallelism.
+// Each table is snapshotted in its own REPEATABLE READ transaction.
 func (r *Runner) Run(ctx context.Context) error {
 	if len(r.cfg.Tables) == 0 {
 		r.log.Info().Msg("no tables configured for snapshot")
@@ -68,18 +79,36 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	start := time.Now()
+
+	g, gCtx := errgroup.WithContext(ctx)
+	g.SetLimit(r.cfg.MaxParallelTables)
+
 	for _, tbl := range r.cfg.Tables {
-		if err := r.snapshotTable(ctx, tbl); err != nil {
-			return fmt.Errorf("snapshot %s: %w", tbl, err)
-		}
+		g.Go(func() error {
+			// Each goroutine gets its own encoder (not safe for concurrent use).
+			enc := encoder.New(encoder.Config{
+				SourceName: r.cfg.Source,
+				Database:   r.cfg.Database,
+			})
+			if err := r.snapshotTable(gCtx, tbl, enc); err != nil {
+				return fmt.Errorf("snapshot %s: %w", tbl, err)
+			}
+			return nil
+		})
 	}
+
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
 	r.metrics.DurationSeconds.Observe(time.Since(start).Seconds())
 	r.log.Info().Int("tables", len(r.cfg.Tables)).Msg("snapshot complete")
 	return nil
 }
 
 // snapshotTable reads all rows from a single table in a consistent snapshot.
-func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error {
+// It detects primary key columns and uses ORDER BY pk for deterministic scanning.
+func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string, enc *encoder.Encoder) error {
 	schema, table := parseQualifiedName(qualifiedName)
 	r.log.Info().Str("table", qualifiedName).Msg("starting table snapshot")
 
@@ -92,14 +121,23 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Use a cursor for bounded memory.
+	// Detect primary key columns for ordered scanning.
+	pkCols, err := r.detectPrimaryKey(ctx, tx, schema, table)
+	if err != nil {
+		r.log.Warn().Err(err).Str("table", qualifiedName).Msg("failed to detect primary key; using unordered scan")
+		pkCols = nil
+	}
+
+	// Build cursor query with optional ORDER BY.
+	tableName := pgx.Identifier{schema, table}.Sanitize()
 	cursorName := "cdc_snapshot_cursor"
-	query := fmt.Sprintf(
-		"DECLARE %s CURSOR FOR SELECT * FROM %s",
-		cursorName,
-		pgx.Identifier{schema, table}.Sanitize(),
-	)
-	if _, err := tx.Exec(ctx, query); err != nil {
+	cursorQuery := fmt.Sprintf("DECLARE %s CURSOR FOR SELECT * FROM %s", cursorName, tableName)
+	if len(pkCols) > 0 {
+		cursorQuery += " ORDER BY " + strings.Join(pkCols, ", ")
+		r.log.Debug().Str("table", qualifiedName).Strs("pk", pkCols).Msg("using PK-ordered scan")
+	}
+
+	if _, err := tx.Exec(ctx, cursorQuery); err != nil {
 		return fmt.Errorf("declare cursor: %w", err)
 	}
 
@@ -143,7 +181,7 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 				CommitTS: time.Now().UTC(),
 			}
 
-			_, _, key, value, err := r.enc.Encode(ev, true)
+			_, _, key, value, err := enc.Encode(ev, true)
 			if err != nil {
 				rows.Close()
 				return fmt.Errorf("encode: %w", err)
@@ -182,10 +220,41 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 	return nil
 }
 
+// detectPrimaryKey queries pg_index to find primary key column names for a table.
+// Returns nil if no primary key exists or on error.
+func (r *Runner) detectPrimaryKey(ctx context.Context, tx pgx.Tx, schema, table string) ([]string, error) {
+	const query = `
+		SELECT a.attname
+		FROM pg_index i
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+		WHERE i.indrelid = ($1 || '.' || $2)::regclass
+		  AND i.indisprimary
+		ORDER BY array_position(i.indkey, a.attnum)`
+
+	rows, err := tx.Query(ctx, query, schema, table)
+	if err != nil {
+		return nil, fmt.Errorf("query pg_index: %w", err)
+	}
+	defer rows.Close()
+
+	var cols []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			return nil, fmt.Errorf("scan pk column: %w", err)
+		}
+		cols = append(cols, col)
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	return cols, nil
+}
+
 // parseQualifiedName splits "schema.table" into (schema, table).
 // Defaults to "public" if no schema is specified.
 func parseQualifiedName(name string) (string, string) {
-	for i := 0; i < len(name); i++ {
+	for i := range len(name) {
 		if name[i] == '.' {
 			return name[:i], name[i+1:]
 		}

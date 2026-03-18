@@ -143,6 +143,7 @@ func run() int {
 		SlotName:        cfg.Replication.SlotName,
 		PublicationName: cfg.Replication.PublicationName,
 		CreateSlot:      cfg.Replication.CreateSlotIfMissing,
+		TemporarySlot:   cfg.Replication.TemporarySlot,
 		StatusInterval:  cfg.Replication.StatusInterval,
 		StartLSN:        startLSN,
 		ConfirmedLSN:    cpMgr.LastFlushed,
@@ -204,10 +205,11 @@ func runSnapshot(ctx context.Context, cfg *config.Config, prod *producer.Produce
 
 	runner := snapshot.NewRunner(
 		snapshot.Config{
-			Tables:    cfg.Snapshot.Tables,
-			FetchSize: cfg.Snapshot.FetchSize,
-			Database:  cfg.Postgres.DBName,
-			Source:    cfg.Metrics.Namespace,
+			Tables:            cfg.Snapshot.Tables,
+			FetchSize:         cfg.Snapshot.FetchSize,
+			MaxParallelTables: cfg.Snapshot.MaxParallelTables,
+			Database:          cfg.Postgres.DBName,
+			Source:            cfg.Metrics.Namespace,
 		},
 		pool, prod, resolver, log, &m.Snapshot,
 	)

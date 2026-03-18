@@ -17,12 +17,14 @@ data:
       slot_name: {{ .Values.replication.slotName | quote }}
       publication_name: {{ .Values.replication.publicationName | quote }}
       create_slot_if_missing: {{ .Values.replication.createSlotIfMissing }}
+      temporary_slot: {{ .Values.replication.temporarySlot }}
       status_interval: {{ .Values.replication.statusInterval | quote }}
       heartbeat_interval: {{ .Values.replication.heartbeatInterval | quote }}
 
     snapshot:
       mode: {{ .Values.snapshot.mode | quote }}
       fetch_size: {{ .Values.snapshot.fetchSize }}
+      max_parallel_tables: {{ .Values.snapshot.maxParallelTables }}
       tables:
         {{- if .Values.snapshot.tables }}
         {{- range .Values.snapshot.tables }}

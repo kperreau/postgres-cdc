@@ -25,6 +25,7 @@ type ReaderConfig struct {
 	SlotName        string
 	PublicationName string
 	CreateSlot      bool
+	TemporarySlot   bool
 	StatusInterval  time.Duration
 	StartLSN        pglogrepl.LSN
 
@@ -169,7 +170,7 @@ func (r *Reader) close() {
 func (r *Reader) ensureSlot(ctx context.Context) error {
 	_, err := pglogrepl.CreateReplicationSlot(ctx, r.conn, r.cfg.SlotName, "pgoutput",
 		pglogrepl.CreateReplicationSlotOptions{
-			Temporary: false,
+			Temporary: r.cfg.TemporarySlot,
 			Mode:      pglogrepl.LogicalReplication,
 		})
 	if err != nil {

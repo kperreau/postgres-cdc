@@ -71,6 +71,8 @@ replication:
   slotName: cdc_slot
   publicationName: cdc_pub
   createSlotIfMissing: true
+  # -- Use a temporary slot (auto-dropped on disconnect). For dev/test/CI only.
+  temporarySlot: false
   statusInterval: 10s
   # -- Heartbeat interval. Emits liveness records to {prefix}.__heartbeat topic.
   # Set to "0s" to disable.
@@ -86,6 +88,8 @@ topic:
 snapshot:
   mode: never              # never | initial
   fetchSize: 10000
+  # -- How many tables to snapshot concurrently. Each opens its own transaction.
+  maxParallelTables: 1
   tables: []
   #   - public.users
   #   - public.orders
