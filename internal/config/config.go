@@ -74,7 +74,25 @@ type ReplicationConfig struct {
 	// connector publishes a lightweight record containing source, timestamp,
 	// and current LSN so downstream consumers can detect liveness and lag.
 	HeartbeatInterval time.Duration `koanf:"heartbeat_interval"`
+
+	// TransactionMarkers enables optional BEGIN/COMMIT marker records.
+	// When true, each transaction boundary emits a marker to the same topic
+	// routing as its events. Useful for debugging and auditing.
+	// Disabled by default.
+	TransactionMarkers bool `koanf:"transaction_markers"`
 }
+
+// ToastStrategy controls how unchanged TOAST values are represented in the
+// CDC envelope.
+type ToastStrategy string
+
+// TOAST handling strategies.
+const (
+	// ToastOmit omits unchanged TOAST columns from the envelope entirely.
+	ToastOmit ToastStrategy = "omit"
+	// ToastSentinel includes a "__toast_unchanged" placeholder string value.
+	ToastSentinel ToastStrategy = "sentinel"
+)
 
 // SnapshotMode controls initial snapshot behavior.
 type SnapshotMode string
@@ -119,6 +137,11 @@ type TopicConfig struct {
 	Mode            model.TopicMode `koanf:"mode"`
 	Prefix          string          `koanf:"prefix"`
 	SingleTopicName string          `koanf:"single_topic_name"`
+
+	// ToastStrategy controls how unchanged TOAST values appear in the envelope.
+	// "omit"     — unchanged TOAST columns are excluded from before/after (default).
+	// "sentinel" — unchanged TOAST columns have the value "__toast_unchanged".
+	ToastStrategy ToastStrategy `koanf:"toast_strategy"`
 }
 
 // CheckpointConfig holds checkpoint persistence settings.
@@ -227,8 +250,9 @@ func DefaultConfig() *Config {
 			RequiredAcks: "all",
 		},
 		Topic: TopicConfig{
-			Mode:   model.TopicPerTable,
-			Prefix: "cdc",
+			Mode:          model.TopicPerTable,
+			Prefix:        "cdc",
+			ToastStrategy: ToastOmit,
 		},
 		Checkpoint: CheckpointConfig{
 			Backend:       "file",
@@ -319,6 +343,11 @@ func (c *Config) Validate() error {
 		}
 	default:
 		errs = append(errs, fmt.Errorf("topic: invalid mode %q (want per_table|single)", c.Topic.Mode))
+	}
+	switch c.Topic.ToastStrategy {
+	case ToastOmit, ToastSentinel, "":
+	default:
+		errs = append(errs, fmt.Errorf("topic: invalid toast_strategy %q (want omit|sentinel)", c.Topic.ToastStrategy))
 	}
 
 	// Checkpoint

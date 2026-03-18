@@ -20,6 +20,7 @@ data:
       temporary_slot: {{ .Values.replication.temporarySlot }}
       status_interval: {{ .Values.replication.statusInterval | quote }}
       heartbeat_interval: {{ .Values.replication.heartbeatInterval | quote }}
+      transaction_markers: {{ .Values.replication.transactionMarkers }}
 
     snapshot:
       mode: {{ .Values.snapshot.mode | quote }}
@@ -57,6 +58,7 @@ data:
       {{- if .Values.topic.singleTopicName }}
       single_topic_name: {{ .Values.topic.singleTopicName | quote }}
       {{- end }}
+      toast_strategy: {{ .Values.topic.toastStrategy | quote }}
 
     checkpoint:
       backend: file

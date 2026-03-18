@@ -36,6 +36,7 @@ type Config struct {
 	MaxParallelTables int
 	Database          string
 	Source            string
+	ToastStrategy     string
 }
 
 // Runner executes initial table snapshots.
@@ -87,8 +88,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		g.Go(func() error {
 			// Each goroutine gets its own encoder (not safe for concurrent use).
 			enc := encoder.New(encoder.Config{
-				SourceName: r.cfg.Source,
-				Database:   r.cfg.Database,
+				SourceName:    r.cfg.Source,
+				Database:      r.cfg.Database,
+				ToastStrategy: r.cfg.ToastStrategy,
 			})
 			if err := r.snapshotTable(gCtx, tbl, enc); err != nil {
 				return fmt.Errorf("snapshot %s: %w", tbl, err)

@@ -41,6 +41,8 @@ type Config struct {
 	// Heartbeat settings. HeartbeatInterval <= 0 disables heartbeat emission.
 	HeartbeatInterval time.Duration
 	HeartbeatTopic    string
+	ToastStrategy     string
+	TxMarkers         bool
 }
 
 // Pipeline coordinates the CDC stages.
@@ -88,8 +90,9 @@ func New(
 	p.encoderPool = sync.Pool{
 		New: func() any {
 			return encoder.New(encoder.Config{
-				SourceName: cfg.SourceName,
-				Database:   cfg.Database,
+				SourceName:    cfg.SourceName,
+				Database:      cfg.Database,
+				ToastStrategy: cfg.ToastStrategy,
 			})
 		},
 	}
@@ -313,11 +316,20 @@ func (p *Pipeline) publishAndConfirm(ctx context.Context, batch *model.TxBatch) 
 
 // publishBatch encodes and publishes all events in a transaction batch.
 // It does NOT confirm the checkpoint — the caller is responsible for that.
+// When TxMarkers is enabled, BEGIN/COMMIT marker records bracket the events.
 func (p *Pipeline) publishBatch(ctx context.Context, batch *model.TxBatch) error {
 	enc := p.encoderPool.Get().(*encoder.Encoder)
 	defer p.encoderPool.Put(enc)
 
-	records := make([]*kgo.Record, 0, len(batch.Events))
+	// Extra capacity for optional tx markers.
+	recCap := len(batch.Events)
+	if p.cfg.TxMarkers {
+		recCap += 2
+	}
+	records := make([]*kgo.Record, 0, recCap)
+
+	// Resolve the first event's topic for tx markers.
+	var markerTopic string
 
 	for i := range batch.Events {
 		ev := &batch.Events[i]
@@ -327,6 +339,9 @@ func (p *Pipeline) publishBatch(ctx context.Context, batch *model.TxBatch) error
 		}
 
 		topicName := p.resolver.Resolve(p.cfg.Database, schema, table)
+		if markerTopic == "" {
+			markerTopic = topicName
+		}
 
 		if err := p.producer.EnsureTopic(ctx, topicName); err != nil {
 			return fmt.Errorf("ensure topic: %w", err)
@@ -339,6 +354,18 @@ func (p *Pipeline) publishBatch(ctx context.Context, batch *model.TxBatch) error
 		})
 
 		p.metrics.CDC.EventsTotal.WithLabelValues(string(ev.Change.Op)).Inc()
+	}
+
+	// Inject tx markers around the event records.
+	if p.cfg.TxMarkers && markerTopic != "" {
+		beginMarker := p.txMarkerRecord(markerTopic, "begin", batch)
+		commitMarker := p.txMarkerRecord(markerTopic, "commit", batch)
+		// Prepend begin, append commit.
+		marked := make([]*kgo.Record, 0, len(records)+2)
+		marked = append(marked, beginMarker)
+		marked = append(marked, records...)
+		marked = append(marked, commitMarker)
+		records = marked
 	}
 
 	if err := p.producer.PublishBatch(ctx, records); err != nil {
@@ -363,6 +390,37 @@ func (p *Pipeline) confirmCheckpoint(lsn pglogrepl.LSN, commitTS time.Time) {
 
 	if lag := time.Since(commitTS).Seconds(); lag > 0 {
 		p.metrics.CDC.CommitLagSeconds.Set(lag)
+	}
+}
+
+// ---------- transaction markers ----------
+
+// txMarkerBody is the JSON payload for BEGIN/COMMIT marker records.
+type txMarkerBody struct {
+	Source   string `json:"source"`
+	Database string `json:"database"`
+	Op       string `json:"op"` // "begin" or "commit"
+	TxID     uint32 `json:"txid"`
+	LSN      string `json:"lsn"`
+	CommitTS string `json:"commit_ts"`
+	Events   int    `json:"event_count"`
+}
+
+// txMarkerRecord builds a BEGIN or COMMIT marker kgo.Record.
+func (p *Pipeline) txMarkerRecord(topicName, op string, batch *model.TxBatch) *kgo.Record {
+	body := txMarkerBody{
+		Source:   p.cfg.SourceName,
+		Database: p.cfg.Database,
+		Op:       op,
+		TxID:     batch.XID,
+		LSN:      batch.LSN.String(),
+		CommitTS: batch.CommitTS.UTC().Format(time.RFC3339),
+		Events:   len(batch.Events),
+	}
+	value, _ := json.Marshal(&body) // marshalling a simple struct won't fail
+	return &kgo.Record{
+		Topic: topicName,
+		Value: value,
 	}
 }
 

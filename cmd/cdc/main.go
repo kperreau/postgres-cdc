@@ -167,6 +167,8 @@ func run() int {
 			Database:          cfg.Postgres.DBName,
 			HeartbeatInterval: cfg.Replication.HeartbeatInterval,
 			HeartbeatTopic:    heartbeatTopic,
+			ToastStrategy:     string(cfg.Topic.ToastStrategy),
+			TxMarkers:         cfg.Replication.TransactionMarkers,
 		},
 		readerCfg, prod, cpMgr, resolver, healthStatus, m, log,
 	)
@@ -210,6 +212,7 @@ func runSnapshot(ctx context.Context, cfg *config.Config, prod *producer.Produce
 			MaxParallelTables: cfg.Snapshot.MaxParallelTables,
 			Database:          cfg.Postgres.DBName,
 			Source:            cfg.Metrics.Namespace,
+			ToastStrategy:     string(cfg.Topic.ToastStrategy),
 		},
 		pool, prod, resolver, log, &m.Snapshot,
 	)

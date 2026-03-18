@@ -17,6 +17,9 @@ replication:
   # Heartbeats go to {topic.prefix}.__heartbeat so downstream consumers can
   # detect liveness and WAL lag even when publication tables are quiet.
   heartbeat_interval: 0s
+  # transaction_markers: emit optional BEGIN/COMMIT marker records around each
+  # transaction's events. Useful for debugging/audit. Disabled by default.
+  transaction_markers: false
 
 snapshot:
   mode: never
@@ -43,6 +46,10 @@ topic:
   mode: per_table
   prefix: cdc
   # single_topic_name: cdc-all  # only used when mode=single
+  # toast_strategy: how unchanged TOAST values appear in the envelope.
+  # "omit"     — exclude from before/after (default)
+  # "sentinel" — include as "__toast_unchanged"
+  toast_strategy: omit
 
 checkpoint:
   backend: file
