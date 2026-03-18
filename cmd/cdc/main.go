@@ -148,12 +148,24 @@ func run() int {
 		ConfirmedLSN:    cpMgr.LastFlushed,
 	}
 
+	// Derive heartbeat topic from prefix when heartbeats are enabled.
+	var heartbeatTopic string
+	if cfg.Replication.HeartbeatInterval > 0 {
+		heartbeatTopic = cfg.Topic.Prefix + ".__heartbeat"
+		if cfg.Topic.Mode == "single" {
+			heartbeatTopic = cfg.Topic.SingleTopicName + ".__heartbeat"
+		}
+	}
+
 	pipe := pipeline.New(
 		pipeline.Config{
-			QueueCapacity: cfg.Runtime.QueueCapacity,
-			MaxTxBytes:    cfg.Runtime.MaxTxBytes,
-			SourceName:    cfg.Metrics.Namespace,
-			Database:      cfg.Postgres.DBName,
+			QueueCapacity:     cfg.Runtime.QueueCapacity,
+			MaxTxBytes:        cfg.Runtime.MaxTxBytes,
+			CheckpointLimit:   cfg.Runtime.CheckpointLimit,
+			SourceName:        cfg.Metrics.Namespace,
+			Database:          cfg.Postgres.DBName,
+			HeartbeatInterval: cfg.Replication.HeartbeatInterval,
+			HeartbeatTopic:    heartbeatTopic,
 		},
 		readerCfg, prod, cpMgr, resolver, healthStatus, m, log,
 	)

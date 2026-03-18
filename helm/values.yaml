@@ -72,6 +72,9 @@ replication:
   publicationName: cdc_pub
   createSlotIfMissing: true
   statusInterval: 10s
+  # -- Heartbeat interval. Emits liveness records to {prefix}.__heartbeat topic.
+  # Set to "0s" to disable.
+  heartbeatInterval: "0s"
 
 # ── Topic routing ─────────────────────────────────────────────────────────────
 topic:
@@ -98,6 +101,9 @@ runtime:
   queueCapacity: 4096
   maxTxBytes: 67108864      # 64 MiB
   shutdownTimeout: 30s
+  # -- Max in-flight tx batches. Checkpoint only advances contiguously.
+  # 1 = sequential (default), higher = bounded async for throughput.
+  checkpointLimit: 1
   producerBatchMaxBytes: 1048576
   producerBatchMaxRecords: 1000
 
