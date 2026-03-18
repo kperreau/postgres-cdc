@@ -59,7 +59,6 @@ func New(ctx context.Context, cfg Config, log zerolog.Logger, m *metrics.CDCMetr
 		kgo.ProducerLinger(cfg.Linger),
 		kgo.MaxBufferedRecords(cfg.MaxInflight),
 		kgo.ProducerBatchMaxBytes(int32(cfg.BatchMaxBytes)),
-		kgo.DisableIdempotentWrite(),
 		kgo.MaxProduceRequestsInflightPerBroker(cfg.MaxInflight),
 	}
 

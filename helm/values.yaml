@@ -159,25 +159,6 @@ leaderElection:
   renewDeadline: 10s
   retryPeriod: 2s
 
-# ── KEDA ─────────────────────────────────────────────────────────────────────
-keda:
-  # -- Enable KEDA ScaledObject. Requires KEDA operator installed in cluster.
-  enabled: false
-  # -- Minimum replicas (0 = scale to zero when no lag detected).
-  minReplicaCount: 1
-  # -- Must stay at 1 to avoid replication slot conflicts.
-  maxReplicaCount: 1
-  pollingInterval: 30
-  cooldownPeriod: 300
-  # -- Prometheus scaler configuration.
-  prometheus:
-    serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
-    # -- Query returning commit lag in seconds. Scale up when > threshold.
-    query: cdc_commit_lag_seconds{namespace="{{ .Release.Namespace }}"}
-    threshold: "30"
-    # -- Scale to zero when lag has been 0 for cooldownPeriod seconds.
-    activationThreshold: "0"
-
 # ── Scheduling ────────────────────────────────────────────────────────────────
 nodeSelector: {}
 
