@@ -28,6 +28,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/kperreau/postgres-cdc/internal/checkpoint"
@@ -164,6 +165,43 @@ func cleanupSlot(t *testing.T, pool *pgxpool.Pool, slotName string) {
 	_, _ = pool.Exec(context.Background(), fmt.Sprintf(
 		"SELECT pg_drop_replication_slot('%s')", slotName,
 	))
+}
+
+// cleanupTopics deletes all Kafka topics whose name starts with the given prefix.
+// Safe to call even if no topics match. Registered via t.Cleanup so topics are
+// removed after each test run, preventing stale data from polluting the next run.
+func cleanupTopics(t *testing.T, prefix string) {
+	t.Helper()
+	cl, err := kgo.NewClient(kgo.SeedBrokers(testBroker()))
+	if err != nil {
+		t.Logf("cleanupTopics: cannot connect: %v", err)
+		return
+	}
+	defer cl.Close()
+
+	adm := kadm.NewClient(cl)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	listed, err := adm.ListTopics(ctx)
+	if err != nil {
+		t.Logf("cleanupTopics: list failed: %v", err)
+		return
+	}
+
+	var toDelete []string
+	for _, tpc := range listed.Sorted() {
+		if strings.HasPrefix(tpc.Topic, prefix) {
+			toDelete = append(toDelete, tpc.Topic)
+		}
+	}
+	if len(toDelete) == 0 {
+		return
+	}
+
+	if _, err := adm.DeleteTopics(ctx, toDelete...); err != nil {
+		t.Logf("cleanupTopics: delete failed: %v", err)
+	}
 }
 
 // consumeEvents polls the topic until n events are received or the deadline is hit.
@@ -377,6 +415,7 @@ func TestEndToEndInsertUpdateDelete(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicPerTable, "cdc_iud", "")
+	t.Cleanup(func() { cleanupTopics(t, "cdc_iud") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
@@ -491,6 +530,7 @@ func TestIntegration_PostgresReconnect(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicPerTable, "cdc_recon", "")
+	t.Cleanup(func() { cleanupTopics(t, "cdc_recon") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
@@ -596,6 +636,7 @@ func TestIntegration_Backpressure(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicPerTable, "cdc_bp", "")
+	t.Cleanup(func() { cleanupTopics(t, "cdc_bp") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
@@ -688,6 +729,7 @@ func TestIntegration_MultiTableTransaction(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicPerTable, "cdc_multi", "")
+	t.Cleanup(func() { cleanupTopics(t, "cdc_multi") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
@@ -770,6 +812,7 @@ func TestIntegration_LargeTransaction(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicPerTable, "cdc_large", "")
+	t.Cleanup(func() { cleanupTopics(t, "cdc_large") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
@@ -848,6 +891,7 @@ func TestIntegration_RapidTransactions(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicPerTable, "cdc_rapid", "")
+	t.Cleanup(func() { cleanupTopics(t, "cdc_rapid") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
@@ -938,6 +982,7 @@ func TestIntegration_UpdateWithOldValues(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicPerTable, "cdc_oldvals", "")
+	t.Cleanup(func() { cleanupTopics(t, "cdc_oldvals") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
@@ -1026,6 +1071,7 @@ func TestIntegration_NullValues(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicPerTable, "cdc_nulls", "")
+	t.Cleanup(func() { cleanupTopics(t, "cdc_nulls") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
@@ -1101,6 +1147,7 @@ func TestIntegration_TemporarySlot(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicPerTable, "cdc_tmpslot", "")
+	t.Cleanup(func() { cleanupTopics(t, "cdc_tmpslot") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
@@ -1183,6 +1230,7 @@ func TestIntegration_CheckpointResume(t *testing.T) {
 	cleanupSlot(t, pool, slotName)
 	setupTable(t, pool, tableName, pubName)
 	t.Cleanup(func() { cleanupSlot(t, pool, slotName) })
+	t.Cleanup(func() { cleanupTopics(t, "cdc_cpresume") })
 
 	cpPath := t.TempDir() + "/cp.json"
 	reg := prometheus.NewRegistry()
@@ -1332,6 +1380,7 @@ func TestIntegration_TransactionMarkers(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicPerTable, "cdc_txmark", "")
+	t.Cleanup(func() { cleanupTopics(t, "cdc_txmark") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
@@ -1425,6 +1474,8 @@ func TestIntegration_HeartbeatEmission(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicPerTable, "cdc_hb", "")
+	t.Cleanup(func() { cleanupTopics(t, "cdc_hb") })
+	t.Cleanup(func() { cleanupTopics(t, "cdc_test_heartbeat") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
@@ -1500,6 +1551,7 @@ func TestIntegration_TopicSingleMode(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicSingle, "", singleTopic)
+	t.Cleanup(func() { cleanupTopics(t, "cdc_test_all_events") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
@@ -1570,6 +1622,7 @@ func TestIntegration_EmptyTransaction(t *testing.T) {
 	_, _ = cpMgr.LoadInitial()
 
 	resolver, _ := topic.NewResolver(model.TopicPerTable, "cdc_empty", "")
+	t.Cleanup(func() { cleanupTopics(t, "cdc_empty") })
 
 	prod := connectProducer(t, ctx, log, &m.CDC)
 	defer prod.Close()
