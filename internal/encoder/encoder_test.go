@@ -123,6 +123,83 @@ func TestDeterministicKeyStringEmpty(t *testing.T) {
 	}
 }
 
+func TestToastOmitStrategy(t *testing.T) {
+	enc := New(Config{SourceName: "pg-main", Database: "app", ToastStrategy: "omit"})
+	ev := &model.TxEvent{
+		Change: model.Change{
+			Op: model.OpUpdate,
+			Relation: &model.Relation{
+				ID: 1, Namespace: "public", Name: "users",
+				Columns: []model.Column{{Name: "id", IsKey: true}, {Name: "bio"}},
+				KeyCols: []int{0},
+			},
+			Before: []model.ColumnValue{
+				{Name: "id", Value: "1"},
+				{Name: "bio", Value: model.ToastUnchanged{}},
+			},
+			After: []model.ColumnValue{
+				{Name: "id", Value: "1"},
+				{Name: "bio", Value: model.ToastUnchanged{}},
+			},
+			LSN: 0x100,
+		},
+		TxID: 1, CommitTS: time.Now(),
+	}
+
+	_, _, _, value, err := enc.Encode(ev, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var env model.CDCEnvelope
+	if err := json.Unmarshal(value, &env); err != nil {
+		t.Fatal(err)
+	}
+
+	// TOAST columns should be omitted from before/after.
+	if _, ok := env.Before["bio"]; ok {
+		t.Error("omit strategy: before should not contain toast column 'bio'")
+	}
+	if _, ok := env.After["bio"]; ok {
+		t.Error("omit strategy: after should not contain toast column 'bio'")
+	}
+}
+
+func TestToastSentinelStrategy(t *testing.T) {
+	enc := New(Config{SourceName: "pg-main", Database: "app", ToastStrategy: "sentinel"})
+	ev := &model.TxEvent{
+		Change: model.Change{
+			Op: model.OpUpdate,
+			Relation: &model.Relation{
+				ID: 1, Namespace: "public", Name: "users",
+				Columns: []model.Column{{Name: "id", IsKey: true}, {Name: "bio"}},
+				KeyCols: []int{0},
+			},
+			After: []model.ColumnValue{
+				{Name: "id", Value: "1"},
+				{Name: "bio", Value: model.ToastUnchanged{}},
+			},
+			LSN: 0x100,
+		},
+		TxID: 1, CommitTS: time.Now(),
+	}
+
+	_, _, _, value, err := enc.Encode(ev, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var env model.CDCEnvelope
+	if err := json.Unmarshal(value, &env); err != nil {
+		t.Fatal(err)
+	}
+
+	// TOAST columns should have the sentinel value.
+	if env.After["bio"] != ToastSentinelValue {
+		t.Errorf("sentinel strategy: after.bio = %v, want %q", env.After["bio"], ToastSentinelValue)
+	}
+}
+
 func BenchmarkEncode(b *testing.B) {
 	enc := New(Config{SourceName: "pg-main", Database: "app"})
 	rel := &model.Relation{

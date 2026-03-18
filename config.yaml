@@ -9,15 +9,24 @@ replication:
   slot_name: cdc_slot
   publication_name: cdc_pub
   create_slot_if_missing: true
+  # temporary_slot: use a temporary replication slot (auto-dropped on disconnect).
+  # Useful for dev/test/CI. Persistent slots are the default for production.
+  temporary_slot: false
   status_interval: 10s
   # heartbeat_interval: emit heartbeat records at this interval (0 = disabled).
   # Heartbeats go to {topic.prefix}.__heartbeat so downstream consumers can
   # detect liveness and WAL lag even when publication tables are quiet.
   heartbeat_interval: 0s
+  # transaction_markers: emit optional BEGIN/COMMIT marker records around each
+  # transaction's events. Useful for debugging/audit. Disabled by default.
+  transaction_markers: false
 
 snapshot:
   mode: never
   fetch_size: 10000
+  # max_parallel_tables: how many tables to snapshot concurrently (default 1).
+  # Each parallel table opens its own REPEATABLE READ transaction.
+  max_parallel_tables: 1
   tables: []
 
 redpanda:
@@ -37,6 +46,10 @@ topic:
   mode: per_table
   prefix: cdc
   # single_topic_name: cdc-all  # only used when mode=single
+  # toast_strategy: how unchanged TOAST values appear in the envelope.
+  # "omit"     — exclude from before/after (default)
+  # "sentinel" — include as "__toast_unchanged"
+  toast_strategy: omit
 
 checkpoint:
   backend: file

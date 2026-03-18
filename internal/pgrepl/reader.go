@@ -25,6 +25,7 @@ type ReaderConfig struct {
 	SlotName        string
 	PublicationName string
 	CreateSlot      bool
+	TemporarySlot   bool
 	StatusInterval  time.Duration
 	StartLSN        pglogrepl.LSN
 
@@ -169,7 +170,7 @@ func (r *Reader) close() {
 func (r *Reader) ensureSlot(ctx context.Context) error {
 	_, err := pglogrepl.CreateReplicationSlot(ctx, r.conn, r.cfg.SlotName, "pgoutput",
 		pglogrepl.CreateReplicationSlotOptions{
-			Temporary: false,
+			Temporary: r.cfg.TemporarySlot,
 			Mode:      pglogrepl.LogicalReplication,
 		})
 	if err != nil {
@@ -411,14 +412,15 @@ func (r *Reader) decodeColumns(relID uint32, tuple *pglogrepl.TupleData) []model
 }
 
 // decodeColumnValue converts a single pglogrepl TupleDataColumn to a Go value.
-// For the MVP, text-format values are returned as strings. Null and TOAST
-// unchanged columns are handled explicitly.
+// Text-format values are returned as strings. Null columns return nil, and
+// TOAST unchanged columns return model.ToastUnchanged{} so callers can
+// distinguish "not sent because unchanged" from an explicit NULL.
 func decodeColumnValue(col *pglogrepl.TupleDataColumn) any {
 	switch col.DataType {
 	case 'n': // null
 		return nil
 	case 'u': // TOAST unchanged
-		return nil
+		return model.ToastUnchanged{}
 	case 't': // text
 		return string(col.Data)
 	default:

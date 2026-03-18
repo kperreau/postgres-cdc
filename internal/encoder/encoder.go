@@ -1,6 +1,10 @@
 // Package encoder converts internal Change/TxEvent types into CDCEnvelope
 // values and serializes them to JSON. It produces deterministic message keys
 // for Kafka partitioning.
+//
+// The ToastStrategy setting controls how unchanged TOAST columns appear:
+//   - "omit"     — excluded from the map entirely (default).
+//   - "sentinel" — present with the string value "__toast_unchanged".
 package encoder
 
 import (
@@ -13,30 +17,34 @@ import (
 	"github.com/kperreau/postgres-cdc/internal/model"
 )
 
+// ToastSentinelValue is the placeholder used when ToastStrategy is "sentinel".
+const ToastSentinelValue = "__toast_unchanged"
+
 // Config holds encoder settings.
 type Config struct {
-	SourceName string // e.g. "postgres-main"
-	Database   string // e.g. "app"
+	SourceName    string // e.g. "postgres-main"
+	Database      string // e.g. "app"
+	ToastStrategy string // "omit" (default) or "sentinel"
 }
 
 // Encoder builds CDCEnvelope values and serializes them to JSON.
-// It is not safe for concurrent use; create one per goroutine or pipeline stage.
+// It is safe for concurrent use: all fields are read-only after construction.
 type Encoder struct {
-	cfg Config
-	buf []byte // reusable JSON marshal buffer
+	cfg           Config
+	toastSentinel bool
 }
 
 // New creates a new Encoder.
 func New(cfg Config) *Encoder {
 	return &Encoder{
-		cfg: cfg,
-		buf: make([]byte, 0, 4096),
+		cfg:           cfg,
+		toastSentinel: cfg.ToastStrategy == "sentinel",
 	}
 }
 
 // Encode converts a TxEvent into a JSON-encoded CDCEnvelope.
 // It returns the topic-routing metadata, the deterministic key bytes,
-// and the value bytes. The returned slices are valid until the next Encode call.
+// and the value bytes.
 func (e *Encoder) Encode(ev *model.TxEvent, snapshot bool) (schema, table string, key, value []byte, err error) {
 	rel := ev.Change.Relation
 	if rel == nil {
@@ -58,8 +66,8 @@ func (e *Encoder) Encode(ev *model.TxEvent, snapshot bool) (schema, table string
 		CommitTS: ev.CommitTS.UTC().Format(time.RFC3339),
 		Snapshot: snapshot,
 		Key:      buildKey(rel, ev),
-		Before:   columnsToMap(ev.Change.Before),
-		After:    columnsToMap(ev.Change.After),
+		Before:   e.columnsToMap(ev.Change.Before),
+		After:    e.columnsToMap(ev.Change.After),
 	}
 
 	// Serialize value (full envelope).
@@ -113,13 +121,22 @@ func buildKey(rel *model.Relation, ev *model.TxEvent) map[string]any {
 }
 
 // columnsToMap converts a ColumnValue slice to a map. Returns nil for empty slices.
-func columnsToMap(cols []model.ColumnValue) map[string]any {
+// Unchanged TOAST columns are handled according to the encoder's ToastStrategy.
+func (e *Encoder) columnsToMap(cols []model.ColumnValue) map[string]any {
 	if len(cols) == 0 {
 		return nil
 	}
 	m := make(map[string]any, len(cols))
 	for i := range cols {
-		m[cols[i].Name] = cols[i].Value
+		v := cols[i].Value
+		if _, ok := v.(model.ToastUnchanged); ok {
+			if e.toastSentinel {
+				m[cols[i].Name] = ToastSentinelValue
+			}
+			// omit strategy: skip the column entirely.
+			continue
+		}
+		m[cols[i].Name] = v
 	}
 	return m
 }

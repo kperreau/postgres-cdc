@@ -42,10 +42,15 @@ type Relation struct {
 	KeyCols   []int // indices into Columns for primary key columns
 }
 
+// ToastUnchanged is a sentinel value indicating a TOAST column whose value
+// was not modified by this change. Downstream consumers can distinguish this
+// from an explicit NULL by checking for this exact type.
+type ToastUnchanged struct{}
+
 // ColumnValue holds a decoded column value for a single row change.
 type ColumnValue struct {
 	Name  string
-	Value any    // decoded Go value
+	Value any    // decoded Go value (nil=NULL, ToastUnchanged=TOAST unchanged)
 	Bytes []byte // raw bytes from pgoutput, for zero-copy encoding paths
 }
 

@@ -71,21 +71,29 @@ replication:
   slotName: cdc_slot
   publicationName: cdc_pub
   createSlotIfMissing: true
+  # -- Use a temporary slot (auto-dropped on disconnect). For dev/test/CI only.
+  temporarySlot: false
   statusInterval: 10s
   # -- Heartbeat interval. Emits liveness records to {prefix}.__heartbeat topic.
   # Set to "0s" to disable.
   heartbeatInterval: "0s"
+  # -- Emit BEGIN/COMMIT markers around each transaction's events (debug/audit).
+  transactionMarkers: false
 
 # ── Topic routing ─────────────────────────────────────────────────────────────
 topic:
   mode: per_table          # per_table | single
   prefix: cdc
   singleTopicName: ""      # required when mode=single
+  # -- TOAST unchanged value strategy: "omit" (default) or "sentinel".
+  toastStrategy: omit
 
 # ── Initial snapshot ──────────────────────────────────────────────────────────
 snapshot:
   mode: never              # never | initial
   fetchSize: 10000
+  # -- How many tables to snapshot concurrently. Each opens its own transaction.
+  maxParallelTables: 1
   tables: []
   #   - public.users
   #   - public.orders
