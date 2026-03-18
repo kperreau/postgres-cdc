@@ -1,7 +1,5 @@
 FROM golang:1.26-alpine AS builder
 
-RUN apk add --no-cache ca-certificates
-
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -9,13 +7,9 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/cdc ./cmd/cdc
 
-FROM alpine:3.21
+FROM gcr.io/distroless/static-debian12:nonroot
 
-RUN apk add --no-cache ca-certificates tzdata
 COPY --from=builder /bin/cdc /usr/local/bin/cdc
-
-RUN addgroup -S cdc && adduser -S cdc -G cdc
-USER cdc
 
 EXPOSE 8080 9090
 
