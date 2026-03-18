@@ -61,6 +61,10 @@ redpanda:
   linger: 5ms
   maxInflight: 5
   requiredAcks: all       # all | leader | none
+  # -- Enable Kafka idempotent producer (EOS stage 1). Deduplicates retries at
+  # the broker level, preventing duplicate records on transient failures.
+  # Requires acks=all. Enabled by default.
+  enableIdempotence: true
   topicAutoCreate:
     # -- Set > 0 to create topics via Admin API before first publish.
     partitions: 3

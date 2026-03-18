@@ -48,6 +48,7 @@ data:
       linger: {{ .Values.redpanda.linger | quote }}
       max_inflight: {{ .Values.redpanda.maxInflight }}
       required_acks: {{ .Values.redpanda.requiredAcks | quote }}
+      enable_idempotence: {{ .Values.redpanda.enableIdempotence }}
       topic_auto_create:
         partitions: {{ .Values.redpanda.topicAutoCreate.partitions }}
         replication_factor: {{ .Values.redpanda.topicAutoCreate.replicationFactor }}

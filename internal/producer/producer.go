@@ -32,6 +32,11 @@ type Config struct {
 	// TopicAutoCreate controls automatic topic creation via the Kafka Admin API.
 	// When Partitions > 0, EnsureTopic will create topics that don't exist yet.
 	// ReplicationFactor defaults to 1 when unset.
+	// EnableIdempotence enables the Kafka idempotent producer (EOS stage 1).
+	// When true, the broker deduplicates retries, preventing duplicate records
+	// on transient failures. Requires acks=all. Enabled by default.
+	EnableIdempotence bool
+
 	TopicPartitions        int32
 	TopicReplicationFactor int16
 }
@@ -60,6 +65,10 @@ func New(ctx context.Context, cfg Config, log zerolog.Logger, m *metrics.CDCMetr
 		kgo.MaxBufferedRecords(cfg.MaxInflight),
 		kgo.ProducerBatchMaxBytes(int32(cfg.BatchMaxBytes)),
 		kgo.MaxProduceRequestsInflightPerBroker(cfg.MaxInflight),
+	}
+
+	if !cfg.EnableIdempotence {
+		opts = append(opts, kgo.DisableIdempotentWrite())
 	}
 
 	// Compression.

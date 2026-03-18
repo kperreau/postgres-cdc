@@ -121,7 +121,8 @@ type RedpandaConfig struct {
 	Compression  string        `koanf:"compression"`
 	Linger       time.Duration `koanf:"linger"`
 	MaxInflight  int           `koanf:"max_inflight"`
-	RequiredAcks string        `koanf:"required_acks"`
+	RequiredAcks      string `koanf:"required_acks"`
+	EnableIdempotence bool   `koanf:"enable_idempotence"`
 
 	// TopicAutoCreate controls automatic topic creation via the Kafka Admin API.
 	// When Partitions > 0, topics are created before first publish if missing.
@@ -243,11 +244,12 @@ func DefaultConfig() *Config {
 			MaxParallelTables: 1,
 		},
 		Redpanda: RedpandaConfig{
-			Brokers:      []string{"localhost:9092"},
-			Compression:  "snappy",
-			Linger:       5 * time.Millisecond,
-			MaxInflight:  5,
-			RequiredAcks: "all",
+			Brokers:           []string{"localhost:9092"},
+			Compression:       "snappy",
+			Linger:            5 * time.Millisecond,
+			MaxInflight:       5,
+			RequiredAcks:      "all",
+			EnableIdempotence: true,
 		},
 		Topic: TopicConfig{
 			Mode:          model.TopicPerTable,

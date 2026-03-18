@@ -95,6 +95,7 @@ func run() int {
 		Linger:                 cfg.Redpanda.Linger,
 		MaxInflight:            cfg.Redpanda.MaxInflight,
 		RequiredAcks:           cfg.Redpanda.RequiredAcks,
+		EnableIdempotence:      cfg.Redpanda.EnableIdempotence,
 		BatchMaxBytes:          cfg.Tuning.ProducerBatchMaxBytes,
 		BatchMaxRecords:        cfg.Tuning.ProducerBatchMaxRecords,
 		TopicPartitions:        cfg.Redpanda.TopicAutoCreate.Partitions,
