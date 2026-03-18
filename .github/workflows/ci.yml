@@ -98,8 +98,8 @@ jobs:
       - name: Configure PostgreSQL for logical replication
         run: |
           PGPASSWORD=changeme psql -h localhost -p 5433 -U cdc -d app -c "ALTER SYSTEM SET wal_level = 'logical';"
-          PGPASSWORD=changeme psql -h localhost -p 5433 -U cdc -d app -c "ALTER SYSTEM SET max_replication_slots = 4;"
-          PGPASSWORD=changeme psql -h localhost -p 5433 -U cdc -d app -c "ALTER SYSTEM SET max_wal_senders = 4;"
+          PGPASSWORD=changeme psql -h localhost -p 5433 -U cdc -d app -c "ALTER SYSTEM SET max_replication_slots = 20;"
+          PGPASSWORD=changeme psql -h localhost -p 5433 -U cdc -d app -c "ALTER SYSTEM SET max_wal_senders = 20;"
           # Restart postgres to apply wal_level change (find container by published port)
           PG_CONTAINER=$(docker ps --filter "publish=5433" -q)
           docker restart "$PG_CONTAINER"
