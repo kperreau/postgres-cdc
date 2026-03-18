@@ -117,12 +117,12 @@ type SnapshotConfig struct {
 
 // RedpandaConfig holds Redpanda/Kafka producer settings.
 type RedpandaConfig struct {
-	Brokers      []string      `koanf:"brokers"`
-	Compression  string        `koanf:"compression"`
-	Linger       time.Duration `koanf:"linger"`
-	MaxInflight  int           `koanf:"max_inflight"`
-	RequiredAcks      string `koanf:"required_acks"`
-	EnableIdempotence bool   `koanf:"enable_idempotence"`
+	Brokers           []string      `koanf:"brokers"`
+	Compression       string        `koanf:"compression"`
+	Linger            time.Duration `koanf:"linger"`
+	MaxInflight       int           `koanf:"max_inflight"`
+	RequiredAcks      string        `koanf:"required_acks"`
+	EnableIdempotence bool          `koanf:"enable_idempotence"`
 
 	// TopicAutoCreate controls automatic topic creation via the Kafka Admin API.
 	// When Partitions > 0, topics are created before first publish if missing.
