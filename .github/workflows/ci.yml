@@ -100,9 +100,9 @@ jobs:
           PGPASSWORD=changeme psql -h localhost -p 5433 -U cdc -d app -c "ALTER SYSTEM SET wal_level = 'logical';"
           PGPASSWORD=changeme psql -h localhost -p 5433 -U cdc -d app -c "ALTER SYSTEM SET max_replication_slots = 4;"
           PGPASSWORD=changeme psql -h localhost -p 5433 -U cdc -d app -c "ALTER SYSTEM SET max_wal_senders = 4;"
-          # Restart postgres to apply wal_level change
-          docker restart $(docker ps -q --filter "ancestor=postgres:16-alpine")
-          sleep 5
+          # Restart postgres to apply wal_level change (find container by published port)
+          PG_CONTAINER=$(docker ps --filter "publish=5433" -q)
+          docker restart "$PG_CONTAINER"
           # Wait for postgres to be ready
           for i in $(seq 1 30); do PGPASSWORD=changeme pg_isready -h localhost -p 5433 -U cdc -d app && break || sleep 1; done
 
@@ -115,7 +115,7 @@ jobs:
   publish:
     name: Build & Push Docker image
     runs-on: ubuntu-latest
-    needs: ci
+    needs: [ci, integration]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
