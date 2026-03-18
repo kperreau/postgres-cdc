@@ -45,6 +45,73 @@ jobs:
       - name: Build
         run: go build -ldflags="-s -w" -o /dev/null ./cmd/cdc
 
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: ci
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cdc
+          POSTGRES_PASSWORD: changeme
+          POSTGRES_DB: app
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U cdc -d app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      kafka:
+        image: bitnami/kafka
+        ports:
+          - 19092:19092
+        options: >-
+          --health-cmd "kafka-broker-api-versions.sh --version"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        env:
+          KAFKA_ENABLE_KRAFT: "yes"
+          KAFKA_CFG_NODE_ID: "1"
+          KAFKA_CFG_PROCESS_ROLES: broker,controller
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:19092
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+          KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:19092
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@:9093
+          ALLOW_PLAINTEXT_LISTENER: "yes"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Configure PostgreSQL for logical replication
+        run: |
+          PGPASSWORD=changeme psql -h localhost -p 5433 -U cdc -d app -c "ALTER SYSTEM SET wal_level = 'logical';"
+          PGPASSWORD=changeme psql -h localhost -p 5433 -U cdc -d app -c "ALTER SYSTEM SET max_replication_slots = 4;"
+          PGPASSWORD=changeme psql -h localhost -p 5433 -U cdc -d app -c "ALTER SYSTEM SET max_wal_senders = 4;"
+          # Restart postgres to apply wal_level change
+          docker restart $(docker ps -q --filter "ancestor=postgres:16-alpine")
+          sleep 5
+          # Wait for postgres to be ready
+          for i in $(seq 1 30); do PGPASSWORD=changeme pg_isready -h localhost -p 5433 -U cdc -d app && break || sleep 1; done
+
+      - name: Integration tests
+        env:
+          TEST_PG_DSN: "host=localhost port=5433 user=cdc password=changeme dbname=app sslmode=disable"
+          TEST_BROKER: "localhost:19092"
+        run: go test -race -tags=integration -count=1 -v -timeout=300s ./internal/
+
   publish:
     name: Build & Push Docker image
     runs-on: ubuntu-latest
