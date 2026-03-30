@@ -171,7 +171,12 @@ func (p *Producer) PublishRecord(ctx context.Context, topic string, key, value [
 // PublishBatch publishes a slice of records synchronously with retry on transient
 // failures. All records must be acknowledged before this returns.
 func (p *Producer) PublishBatch(ctx context.Context, records []*kgo.Record) error {
-	return p.publishWithRetry(ctx, records)
+	for _, chunk := range chunkRecords(records, p.cfg.BatchMaxRecords) {
+		if err := p.publishWithRetry(ctx, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // publishWithRetry wraps the publish call with exponential backoff. On transient
@@ -186,7 +191,7 @@ func (p *Producer) publishWithRetry(ctx context.Context, records []*kgo.Record) 
 		results := p.client.ProduceSync(ctx, records...)
 		for _, r := range results {
 			if r.Err != nil {
-				if perm := permanentKafkaProduceErr(r.Err); perm != nil {
+				if perm := permanentKafkaProduceErr(r.Err, records, p.cfg); perm != nil {
 					p.setHealthy(false)
 					p.log.Error().Err(perm).Msg("publish failed; not retrying")
 					return struct{}{}, perm
@@ -233,21 +238,72 @@ func (p *Producer) setHealthy(v bool) {
 	p.mu.Unlock()
 }
 
+type batchSummary struct {
+	Count             int
+	TotalPayloadBytes int
+	MaxPayloadBytes   int
+	MaxPayloadTopic   string
+}
+
+func summarizeBatch(records []*kgo.Record) batchSummary {
+	summary := batchSummary{Count: len(records)}
+	for _, rec := range records {
+		payloadBytes := len(rec.Key) + len(rec.Value)
+		summary.TotalPayloadBytes += payloadBytes
+		if payloadBytes > summary.MaxPayloadBytes {
+			summary.MaxPayloadBytes = payloadBytes
+			summary.MaxPayloadTopic = rec.Topic
+		}
+	}
+	return summary
+}
+
+func chunkRecords(records []*kgo.Record, maxRecords int) [][]*kgo.Record {
+	if len(records) == 0 {
+		return nil
+	}
+	if maxRecords <= 0 || len(records) <= maxRecords {
+		return [][]*kgo.Record{records}
+	}
+
+	chunks := make([][]*kgo.Record, 0, (len(records)+maxRecords-1)/maxRecords)
+	for start := 0; start < len(records); start += maxRecords {
+		end := min(start+maxRecords, len(records))
+		chunks = append(chunks, records[start:end])
+	}
+	return chunks
+}
+
 // permanentKafkaProduceErr wraps broker errors that retrying cannot fix.
-func permanentKafkaProduceErr(err error) error {
+func permanentKafkaProduceErr(err error, records []*kgo.Record, cfg Config) error {
 	var ke *kerr.Error
 	if !errors.As(err, &ke) {
 		return nil
 	}
+
+	summary := summarizeBatch(records)
 	switch ke.Code {
 	case kerr.MessageTooLarge.Code:
 		return backoff.Permanent(fmt.Errorf(
-			`%w: raise tuning.producer_batch_max_bytes to at least the largest encoded CDC record, and raise the broker message.max.bytes (or Redpanda equivalent) to match or exceed that`,
-			err))
+			`%w: largest record key+value payload=%d bytes on topic %q; batch payload=%d bytes across %d records; configured tuning.producer_batch_max_bytes=%d; raise tuning.producer_batch_max_bytes to at least the largest encoded CDC record, and raise the broker message.max.bytes (or Redpanda equivalent) to match or exceed that`,
+			err,
+			summary.MaxPayloadBytes,
+			summary.MaxPayloadTopic,
+			summary.TotalPayloadBytes,
+			summary.Count,
+			cfg.BatchMaxBytes,
+		))
 	case kerr.RecordListTooLarge.Code:
 		return backoff.Permanent(fmt.Errorf(
-			`%w: lower tuning.producer_batch_max_bytes or producer_batch_max_records, or increase broker segment / batch limits`,
-			err))
+			`%w: batch payload=%d bytes across %d records (largest record key+value payload=%d bytes on topic %q); configured tuning.producer_batch_max_bytes=%d and tuning.producer_batch_max_records=%d; lower tuning.producer_batch_max_bytes or producer_batch_max_records, or increase broker segment / batch limits`,
+			err,
+			summary.TotalPayloadBytes,
+			summary.Count,
+			summary.MaxPayloadBytes,
+			summary.MaxPayloadTopic,
+			cfg.BatchMaxBytes,
+			cfg.BatchMaxRecords,
+		))
 	default:
 		return nil
 	}
