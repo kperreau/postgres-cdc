@@ -4,7 +4,8 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/kperreau/postgres-cdc
+  # Docker Hub (CI publishes to kperreau/postgres-cdc).
+  repository: kperreau/postgres-cdc
   pullPolicy: IfNotPresent
   # -- Overrides the image tag. Defaults to Chart.appVersion.
   tag: ""
