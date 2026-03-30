@@ -24,6 +24,9 @@ type Config struct {
 	Brokers         []string
 	Compression     string
 	Linger          time.Duration
+	// MaxInflight is the max produce requests in flight per broker when
+	// EnableIdempotence is false. With idempotence (franz-go default), the
+	// broker limit is fixed at 1; this value still sets MaxBufferedRecords.
 	MaxInflight     int
 	RequiredAcks    string
 	BatchMaxBytes   int
@@ -64,10 +67,12 @@ func New(ctx context.Context, cfg Config, log zerolog.Logger, m *metrics.CDCMetr
 		kgo.ProducerLinger(cfg.Linger),
 		kgo.MaxBufferedRecords(cfg.MaxInflight),
 		kgo.ProducerBatchMaxBytes(int32(cfg.BatchMaxBytes)),
-		kgo.MaxProduceRequestsInflightPerBroker(cfg.MaxInflight),
 	}
-
+	// Idempotent producer requires max in-flight produce requests per broker == 1
+	// (franz-go default). MaxProduceRequestsInflightPerBroker may only be set when
+	// idempotency is disabled.
 	if !cfg.EnableIdempotence {
+		opts = append(opts, kgo.MaxProduceRequestsInflightPerBroker(cfg.MaxInflight))
 		opts = append(opts, kgo.DisableIdempotentWrite())
 	}
 

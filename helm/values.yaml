@@ -60,6 +60,8 @@ redpanda:
   #   - redpanda:9092
   compression: snappy     # none | snappy | lz4 | zstd | gzip
   linger: 5ms
+  # -- With enableIdempotence=true, franz-go fixes broker in-flight produce
+  # requests at 1; this value still caps MaxBufferedRecords on the client.
   maxInflight: 5
   requiredAcks: all       # all | leader | none
   # -- Enable Kafka idempotent producer (EOS stage 1). Deduplicates retries at
