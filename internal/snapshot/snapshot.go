@@ -147,7 +147,10 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 	var rowCount int64
 
 	for {
-		rows, err := tx.Query(ctx, fetchQuery)
+		// Use simple protocol so pgx does not reuse a cached prepared statement for FETCH.
+		// Extended protocol + statement cache can send wrong result format counts vs. cursor
+		// row shape (ERROR: bind message has N result formats but query has M columns).
+		rows, err := tx.Conn().Query(ctx, fetchQuery, pgx.QueryExecModeSimpleProtocol)
 		if err != nil {
 			return fmt.Errorf("fetch: %w", err)
 		}
