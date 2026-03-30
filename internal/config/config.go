@@ -281,7 +281,9 @@ func DefaultConfig() *Config {
 			ListenAddr: ":8080",
 		},
 		Tuning: TuningConfig{
-			ProducerBatchMaxBytes:   1048576, // 1 MiB
+			// franz-go ProducerBatchMaxBytes mirrors Kafka max.message.bytes; 1 MiB is
+			// often too small for wide rows or JSONB. Align with broker limits.
+			ProducerBatchMaxBytes:   16 * 1024 * 1024, // 16 MiB
 			ProducerBatchMaxRecords: 1000,
 		},
 	}
@@ -378,6 +380,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Replication.HeartbeatInterval < 0 {
 		errs = append(errs, errors.New("replication: heartbeat_interval must be >= 0"))
+	}
+
+	// Tuning (franz-go allows 512 .. 1<<30 for ProducerBatchMaxBytes)
+	if c.Tuning.ProducerBatchMaxBytes < 512 || c.Tuning.ProducerBatchMaxBytes > 1<<30 {
+		errs = append(errs, errors.New("tuning: producer_batch_max_bytes must be between 512 and 1GiB (1<<30)"))
+	}
+	if c.Tuning.ProducerBatchMaxRecords <= 0 {
+		errs = append(errs, errors.New("tuning: producer_batch_max_records must be > 0"))
 	}
 
 	// Metrics

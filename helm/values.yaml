@@ -119,7 +119,9 @@ runtime:
   # -- Max in-flight tx batches. Checkpoint only advances contiguously.
   # 1 = sequential (default), higher = bounded async for throughput.
   checkpointLimit: 1
-  producerBatchMaxBytes: 1048576
+  # -- Upper bound for a Kafka record batch (franz-go ProducerBatchMaxBytes ≈ max.message.bytes).
+  # Must be <= broker message.max.bytes; raise both if rows encode larger than this.
+  producerBatchMaxBytes: 16777216
   producerBatchMaxRecords: 1000
 
 # ── Logging & Metrics ─────────────────────────────────────────────────────────

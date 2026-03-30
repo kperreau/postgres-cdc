@@ -186,6 +186,11 @@ func (p *Producer) publishWithRetry(ctx context.Context, records []*kgo.Record) 
 		results := p.client.ProduceSync(ctx, records...)
 		for _, r := range results {
 			if r.Err != nil {
+				if perm := permanentKafkaProduceErr(r.Err); perm != nil {
+					p.setHealthy(false)
+					p.log.Error().Err(perm).Msg("publish failed; not retrying")
+					return struct{}{}, perm
+				}
 				p.metrics.PublishRetriesTotal.Inc()
 				p.setHealthy(false)
 				p.log.Warn().Err(r.Err).Msg("publish failed; retrying")
@@ -226,4 +231,24 @@ func (p *Producer) setHealthy(v bool) {
 	p.mu.Lock()
 	p.healthy = v
 	p.mu.Unlock()
+}
+
+// permanentKafkaProduceErr wraps broker errors that retrying cannot fix.
+func permanentKafkaProduceErr(err error) error {
+	var ke *kerr.Error
+	if !errors.As(err, &ke) {
+		return nil
+	}
+	switch ke.Code {
+	case kerr.MessageTooLarge.Code:
+		return backoff.Permanent(fmt.Errorf(
+			`%w: raise tuning.producer_batch_max_bytes to at least the largest encoded CDC record, and raise the broker message.max.bytes (or Redpanda equivalent) to match or exceed that`,
+			err))
+	case kerr.RecordListTooLarge.Code:
+		return backoff.Permanent(fmt.Errorf(
+			`%w: lower tuning.producer_batch_max_bytes or producer_batch_max_records, or increase broker segment / batch limits`,
+			err))
+	default:
+		return nil
+	}
 }

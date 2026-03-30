@@ -81,5 +81,5 @@ health:
   listen_addr: ":8080"
 
 tuning:
-  producer_batch_max_bytes: 1048576    # 1 MiB
+  producer_batch_max_bytes: 16777216   # 16 MiB (must be <= broker message.max.bytes)
   producer_batch_max_records: 1000
