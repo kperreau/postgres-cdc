@@ -5,18 +5,21 @@
 //
 // Run with:
 //
-//	docker compose up -d postgres
-//	go test -race -tags=integration -count=1 -v -timeout=300s ./internal/
+//	docker compose up -d postgres redpanda clickhouse
+//	TEST_BROKER=localhost:29092 go test -race -tags=integration -count=1 -v -timeout=300s ./internal/
 //
 // Environment variables (with defaults for local docker-compose):
 //
-//	TEST_PG_DSN     host=localhost port=5433 user=cdc password=changeme dbname=app sslmode=disable
-//	TEST_BROKER     localhost:19092
-//	TEST_PG_CONTAINER  (empty = skip docker restart tests)
+//	TEST_PG_DSN          host=localhost port=5433 user=cdc password=changeme dbname=app sslmode=disable
+//	TEST_BROKER          localhost:19092 (CI); use localhost:29092 with repo docker-compose + Redpanda
+//	TEST_CLICKHOUSE_ADDR localhost:9000 (native protocol from host to ClickHouse container)
+//	TEST_CH_KAFKA_BROKER redpanda:9092 (broker hostname as seen from the ClickHouse container on compose network)
+//	TEST_PG_CONTAINER    (empty = skip docker restart tests)
 package integration_test
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	json "github.com/goccy/go-json"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
@@ -62,7 +66,208 @@ func testPGContainer() string {
 	return os.Getenv("TEST_PG_CONTAINER")
 }
 
+func testClickHouseAddr() string {
+	return envOr("TEST_CLICKHOUSE_ADDR", "localhost:9000")
+}
+
+// testCHKafkaBroker is the broker list passed to ClickHouse ENGINE = Kafka (container-to-broker DNS).
+func testCHKafkaBroker() string {
+	return envOr("TEST_CH_KAFKA_BROKER", "redpanda:9092")
+}
+
 const testDatabase = "app"
+
+// ClickHouse objects for Postgres↔ClickHouse sync e2e (single non-parallel test).
+const (
+	chMirrorTable = "cdc_ch_sync_mirror"
+	chKafkaTable  = "cdc_ch_sync_kafka"
+	chMVTable     = "cdc_ch_sync_mv"
+)
+
+func escapeCHSQLString(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
+func connectClickHouse(t *testing.T, ctx context.Context) clickhouse.Conn {
+	t.Helper()
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{testClickHouseAddr()},
+		Auth: clickhouse.Auth{Database: "default"},
+	})
+	if err != nil {
+		t.Skipf("clickhouse open: %v", err)
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := conn.Ping(pingCtx); err != nil {
+		_ = conn.Close()
+		t.Skipf("clickhouse ping: %v", err)
+	}
+	return conn
+}
+
+func teardownClickHouseSink(ctx context.Context, conn clickhouse.Conn) {
+	stmts := []string{
+		fmt.Sprintf("DROP TABLE IF EXISTS %s", chMVTable),
+		fmt.Sprintf("DROP TABLE IF EXISTS %s", chKafkaTable),
+		fmt.Sprintf("DROP TABLE IF EXISTS %s", chMirrorTable),
+	}
+	for _, s := range stmts {
+		_ = conn.Exec(ctx, s)
+	}
+}
+
+func setupClickHouseCDCSink(
+	ctx context.Context,
+	t *testing.T,
+	conn clickhouse.Conn,
+	kafkaBroker, kafkaTopic, consumerGroup string,
+) {
+	t.Helper()
+	broker := escapeCHSQLString(kafkaBroker)
+	topic := escapeCHSQLString(kafkaTopic)
+	group := escapeCHSQLString(consumerGroup)
+
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE %s (
+			id UInt32,
+			name String,
+			email Nullable(String),
+			ver UInt64,
+			is_deleted UInt8
+		) ENGINE = ReplacingMergeTree(ver)
+		ORDER BY id`, chMirrorTable),
+		fmt.Sprintf(`CREATE TABLE %s (
+			raw String
+		) ENGINE = Kafka()
+		SETTINGS
+			kafka_broker_list = '%s',
+			kafka_topic_list = '%s',
+			kafka_group_name = '%s',
+			kafka_format = 'JSONAsString',
+			kafka_num_consumers = 1`, chKafkaTable, broker, topic, group),
+		fmt.Sprintf(`CREATE MATERIALIZED VIEW %s TO %s AS
+		SELECT
+			multiIf(
+				JSONExtractString(raw, 'op') IN ('c', 'r', 'u'),
+				toUInt32(JSONExtractInt(raw, 'after', 'id')),
+				JSONExtractString(raw, 'op') = 'd',
+				toUInt32(JSONExtractInt(raw, 'before', 'id')),
+				toUInt32(0)
+			) AS id,
+			if(JSONExtractString(raw, 'op') IN ('c', 'r', 'u'), JSONExtractString(raw, 'after', 'name'), '') AS name,
+			if(
+				JSONExtractString(raw, 'op') IN ('c', 'r', 'u'),
+				JSONExtract(raw, 'after', 'email', 'Nullable(String)'),
+				CAST(NULL AS Nullable(String))
+			) AS email,
+			toUInt64(JSONExtractUInt(raw, 'txid')) AS ver,
+			if(JSONExtractString(raw, 'op') = 'd', 1, 0) AS is_deleted
+		FROM %s
+		WHERE JSONExtractString(raw, 'op') IN ('c', 'r', 'u', 'd')`, chMVTable, chMirrorTable, chKafkaTable),
+	}
+	for _, s := range stmts {
+		if err := conn.Exec(ctx, s); err != nil {
+			t.Fatalf("clickhouse ddl: %v\n%s", err, s)
+		}
+	}
+}
+
+type syncRow struct {
+	ID    int32
+	Name  string
+	Email sql.NullString
+}
+
+func fetchPGSyncRows(ctx context.Context, pool *pgxpool.Pool, table string) ([]syncRow, error) {
+	q := fmt.Sprintf(`SELECT id, name, email FROM %s ORDER BY id`, table)
+	rows, err := pool.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []syncRow
+	for rows.Next() {
+		var r syncRow
+		if err := rows.Scan(&r.ID, &r.Name, &r.Email); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func fetchCHSyncRows(ctx context.Context, conn clickhouse.Conn) ([]syncRow, error) {
+	q := fmt.Sprintf(`SELECT id, name, email FROM %s FINAL WHERE is_deleted = 0 ORDER BY id`, chMirrorTable)
+	rows, err := conn.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []syncRow
+	for rows.Next() {
+		var r syncRow
+		if err := rows.Scan(&r.ID, &r.Name, &r.Email); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func syncRowsEqual(a, b []syncRow) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID || a[i].Name != b[i].Name {
+			return false
+		}
+		if a[i].Email.Valid != b[i].Email.Valid {
+			return false
+		}
+		if a[i].Email.Valid && a[i].Email.String != b[i].Email.String {
+			return false
+		}
+	}
+	return true
+}
+
+func waitPGClickHouseParity(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	conn clickhouse.Conn,
+	pgTable string,
+	timeout time.Duration,
+) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastPG, lastCH []syncRow
+	var lastErr error
+	for time.Now().Before(deadline) {
+		pgRows, errP := fetchPGSyncRows(ctx, pool, pgTable)
+		chRows, errC := fetchCHSyncRows(ctx, conn)
+		lastErr = nil
+		if errP != nil {
+			lastErr = errP
+		} else if errC != nil {
+			lastErr = errC
+		} else {
+			lastPG, lastCH = pgRows, chRows
+			if syncRowsEqual(pgRows, chRows) {
+				return
+			}
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	if lastErr != nil {
+		t.Fatalf("read rows while waiting for parity: %v", lastErr)
+	}
+	t.Fatalf("timeout waiting for ClickHouse mirror to match PostgreSQL: pg=%v ch=%v", lastPG, lastCH)
+}
 
 // ── Common helpers ────────────────────────────────────────────────────────
 
@@ -1657,6 +1862,77 @@ func TestIntegration_EmptyTransaction(t *testing.T) {
 	if len(envelopes) > 0 && envelopes[0].Op != "c" {
 		t.Errorf("expected op=c for sentinel, got %s", envelopes[0].Op)
 	}
+
+	pipeCancel()
+	<-pipeErrCh
+}
+
+// ── Test 15: PostgreSQL → CDC → Kafka → ClickHouse row parity ─────────────
+// Uses ClickHouse Kafka engine + materialized view (ReplacingMergeTree + delete
+// tombstones). Does not use t.Parallel: fixed ClickHouse object names.
+
+func TestEndToEnd_PostgresClickHouseSync(t *testing.T) {
+	const (
+		slotName  = "cdc_test_chsync"
+		pubName   = "cdc_test_chsync_pub"
+		tableName = "integration_test_ch"
+		topicPref = "cdc_ch"
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	chConn := connectClickHouse(t, ctx)
+	defer chConn.Close()
+
+	pool := connectPG(t, ctx)
+	defer pool.Close()
+
+	cleanupSlot(t, pool, slotName)
+	setupTable(t, pool, tableName, pubName)
+	t.Cleanup(func() { cleanupSlot(t, pool, slotName) })
+
+	resolver, _ := topic.NewResolver(model.TopicPerTable, topicPref, "")
+	topicName := resolver.Resolve(testDatabase, "public", tableName)
+	t.Cleanup(func() { cleanupTopics(t, topicPref) })
+	t.Cleanup(func() { teardownClickHouseSink(context.Background(), chConn) })
+
+	teardownClickHouseSink(ctx, chConn)
+	setupClickHouseCDCSink(ctx, t, chConn, testCHKafkaBroker(), topicName, "cdc_ch_sync_consumer")
+
+	log := testLogger()
+	reg := prometheus.NewRegistry()
+	m := metrics.NewWithRegistry("chsync", reg)
+	cpStore, _ := checkpoint.NewFileStore(t.TempDir() + "/cp.json")
+	cpMgr := checkpoint.NewManager(cpStore, 100*time.Millisecond, log, &m.CDC)
+	_, _ = cpMgr.LoadInitial()
+
+	prod := connectProducer(t, ctx, log, &m.CDC)
+	defer prod.Close()
+
+	hs := health.NewStatus()
+	pipeCancel, pipeErrCh := startPipeline(ctx, t, prod, m, cpMgr, resolver, hs, slotName, pubName, defaultPipelineCfg())
+	defer pipeCancel()
+
+	time.Sleep(3 * time.Second)
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO %s (name, email) VALUES ('alice', 'alice@example.com'), ('bob', 'bob@example.com'), ('carol', 'carol@example.com')`,
+		tableName))
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	_, err = pool.Exec(ctx, fmt.Sprintf(
+		`UPDATE %s SET email = 'bob2@example.com' WHERE name = 'bob'`, tableName))
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	_, err = pool.Exec(ctx, fmt.Sprintf(`DELETE FROM %s WHERE name = 'carol'`, tableName))
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	waitPGClickHouseParity(t, ctx, pool, chConn, tableName, 60*time.Second)
 
 	pipeCancel()
 	<-pipeErrCh

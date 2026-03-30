@@ -85,6 +85,17 @@ jobs:
           KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@:9093
           ALLOW_PLAINTEXT_LISTENER: "yes"
 
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8-alpine
+        ports:
+          - 9000:9000
+          - 8123:8123
+        options: >-
+          --health-cmd "clickhouse-client -q 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 25
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -110,6 +121,8 @@ jobs:
         env:
           TEST_PG_DSN: "host=localhost port=5433 user=cdc password=changeme dbname=app sslmode=disable"
           TEST_BROKER: "localhost:19092"
+          TEST_CLICKHOUSE_ADDR: "localhost:9000"
+          TEST_CH_KAFKA_BROKER: "kafka:9092"
         run: go test -race -tags=integration -count=1 -v -timeout=300s ./internal/
 
   publish:
