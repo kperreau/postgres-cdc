@@ -415,12 +415,20 @@ func (r *Reader) decodeColumns(relID uint32, tuple *pglogrepl.TupleData) []model
 			name = rel.Columns[i].Name
 		}
 		cols[i] = model.ColumnValue{
-			Name:  name,
-			Bytes: col.Data,
-			Value: decodeColumnValue(col),
+			Name:    name,
+			TypeOID: relationColumnTypeOID(rel, i),
+			Bytes:   col.Data,
+			Value:   decodeColumnValue(col),
 		}
 	}
 	return cols
+}
+
+func relationColumnTypeOID(rel *model.Relation, idx int) uint32 {
+	if rel == nil || idx >= len(rel.Columns) {
+		return 0
+	}
+	return rel.Columns[idx].TypeOID
 }
 
 // decodeColumnValue converts a single pglogrepl TupleDataColumn to a Go value.

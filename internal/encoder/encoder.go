@@ -13,12 +13,15 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
+	"github.com/google/uuid"
 
 	"github.com/kperreau/postgres-cdc/internal/model"
 )
 
 // ToastSentinelValue is the placeholder used when ToastStrategy is "sentinel".
 const ToastSentinelValue = "__toast_unchanged"
+
+const uuidOID uint32 = 2950
 
 // Config holds encoder settings.
 type Config struct {
@@ -106,7 +109,7 @@ func buildKey(rel *model.Relation, ev *model.TxEvent) map[string]any {
 		m := make(map[string]any, len(rel.KeyCols))
 		for _, idx := range rel.KeyCols {
 			if idx < len(row) {
-				m[row[idx].Name] = row[idx].Value
+				m[row[idx].Name] = normalizeColumnValue(row[idx])
 			}
 		}
 		return m
@@ -115,7 +118,7 @@ func buildKey(rel *model.Relation, ev *model.TxEvent) map[string]any {
 	// Fallback: use all columns as key (not ideal but deterministic).
 	m := make(map[string]any, len(row))
 	for i := range row {
-		m[row[i].Name] = row[i].Value
+		m[row[i].Name] = normalizeColumnValue(row[i])
 	}
 	return m
 }
@@ -136,9 +139,36 @@ func (e *Encoder) columnsToMap(cols []model.ColumnValue) map[string]any {
 			// omit strategy: skip the column entirely.
 			continue
 		}
-		m[cols[i].Name] = v
+		m[cols[i].Name] = normalizeColumnValue(cols[i])
 	}
 	return m
+}
+
+func normalizeColumnValue(col model.ColumnValue) any {
+	if col.Value == nil {
+		return nil
+	}
+	if _, ok := col.Value.(model.ToastUnchanged); ok {
+		return col.Value
+	}
+
+	switch col.TypeOID {
+	case uuidOID:
+		switch v := col.Value.(type) {
+		case string:
+			return v
+		case [16]byte:
+			if u, err := uuid.FromBytes(v[:]); err == nil {
+				return u.String()
+			}
+		case []byte:
+			if u, err := uuid.FromBytes(v); err == nil {
+				return u.String()
+			}
+		}
+	}
+
+	return col.Value
 }
 
 // DeterministicKeyString returns a stable string representation of a key map,

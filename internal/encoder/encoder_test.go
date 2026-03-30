@@ -370,6 +370,69 @@ func TestEncodeNoKeyColumns(t *testing.T) {
 	}
 }
 
+func TestEncodeSnapshotUUIDColumnsUseStringsAndPKOnly(t *testing.T) {
+	t.Parallel()
+	enc := New(Config{SourceName: "pg-main", Database: "app"})
+	orgID := []byte{84, 245, 17, 55, 211, 251, 69, 160, 190, 222, 222, 224, 148, 95, 149, 154}
+	subscriptionOfferID := []byte{8, 161, 172, 57, 95, 148, 65, 251, 151, 249, 238, 81, 113, 138, 189, 42}
+
+	ev := &model.TxEvent{
+		Change: model.Change{
+			Op: model.OpSnapshot,
+			Relation: &model.Relation{
+				Namespace: "public",
+				Name:      "billing_credit_balances",
+				Columns: []model.Column{
+					{Name: "organization_id", TypeOID: uuidOID, IsKey: true},
+					{Name: "subscription_offer_id", TypeOID: uuidOID, IsKey: true},
+					{Name: "balance"},
+				},
+				KeyCols: []int{0, 1},
+			},
+			After: []model.ColumnValue{
+				{Name: "organization_id", TypeOID: uuidOID, Value: orgID},
+				{Name: "subscription_offer_id", TypeOID: uuidOID, Value: subscriptionOfferID},
+				{Name: "balance", Value: int64(9245)},
+			},
+			LSN: 0x900,
+		},
+		CommitTS: time.Now(),
+	}
+
+	_, _, key, value, err := enc.Encode(ev, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var keyMap map[string]any
+	if err := json.Unmarshal(key, &keyMap); err != nil {
+		t.Fatal(err)
+	}
+	if len(keyMap) != 2 {
+		t.Fatalf("snapshot key should include only PK columns, got %d entries", len(keyMap))
+	}
+	if keyMap["organization_id"] != "54f51137-d3fb-45a0-bede-dee0945f959a" {
+		t.Fatalf("organization_id key = %v", keyMap["organization_id"])
+	}
+	if keyMap["subscription_offer_id"] != "08a1ac39-5f94-41fb-97f9-ee51718abd2a" {
+		t.Fatalf("subscription_offer_id key = %v", keyMap["subscription_offer_id"])
+	}
+
+	var env model.CDCEnvelope
+	if err := json.Unmarshal(value, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.After["organization_id"] != "54f51137-d3fb-45a0-bede-dee0945f959a" {
+		t.Fatalf("after.organization_id = %v", env.After["organization_id"])
+	}
+	if env.After["subscription_offer_id"] != "08a1ac39-5f94-41fb-97f9-ee51718abd2a" {
+		t.Fatalf("after.subscription_offer_id = %v", env.After["subscription_offer_id"])
+	}
+	if env.After["balance"] != float64(9245) {
+		t.Fatalf("after.balance = %v", env.After["balance"])
+	}
+}
+
 func TestEncodeDeleteNullAfter(t *testing.T) {
 	t.Parallel()
 	enc := New(Config{SourceName: "pg-main", Database: "app"})

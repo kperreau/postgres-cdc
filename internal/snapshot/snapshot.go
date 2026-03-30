@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -156,6 +157,7 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 		}
 
 		descs := rows.FieldDescriptions()
+		rel := buildSnapshotRelation(schema, table, descs, pkCols)
 		batchRecords := make([]*kgo.Record, 0, r.cfg.FetchSize)
 		fetched := 0
 
@@ -169,8 +171,9 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 			cols := make([]model.ColumnValue, len(descs))
 			for i, desc := range descs {
 				cols[i] = model.ColumnValue{
-					Name:  desc.Name,
-					Value: values[i],
+					Name:    desc.Name,
+					TypeOID: uint32(desc.DataTypeOID),
+					Value:   values[i],
 				}
 			}
 
@@ -178,8 +181,10 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 				Change: model.Change{
 					Op: model.OpSnapshot,
 					Relation: &model.Relation{
-						Namespace: schema,
-						Name:      table,
+						Namespace: rel.Namespace,
+						Name:      rel.Name,
+						Columns:   rel.Columns,
+						KeyCols:   rel.KeyCols,
 					},
 					After: cols,
 				},
@@ -265,4 +270,32 @@ func parseQualifiedName(name string) (string, string) {
 		}
 	}
 	return "public", name
+}
+
+func buildSnapshotRelation(schema, table string, descs []pgconn.FieldDescription, pkCols []string) *model.Relation {
+	pkSet := make(map[string]struct{}, len(pkCols))
+	for _, name := range pkCols {
+		pkSet[name] = struct{}{}
+	}
+
+	cols := make([]model.Column, len(descs))
+	keyCols := make([]int, 0, len(pkCols))
+	for i, desc := range descs {
+		_, isKey := pkSet[desc.Name]
+		cols[i] = model.Column{
+			Name:    desc.Name,
+			TypeOID: uint32(desc.DataTypeOID),
+			IsKey:   isKey,
+		}
+		if isKey {
+			keyCols = append(keyCols, i)
+		}
+	}
+
+	return &model.Relation{
+		Namespace: schema,
+		Name:      table,
+		Columns:   cols,
+		KeyCols:   keyCols,
+	}
 }

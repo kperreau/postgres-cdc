@@ -49,9 +49,10 @@ type ToastUnchanged struct{}
 
 // ColumnValue holds a decoded column value for a single row change.
 type ColumnValue struct {
-	Name  string
-	Value any    // decoded Go value (nil=NULL, ToastUnchanged=TOAST unchanged)
-	Bytes []byte // raw bytes from pgoutput, for zero-copy encoding paths
+	Name    string
+	TypeOID uint32
+	Value   any    // decoded Go value (nil=NULL, ToastUnchanged=TOAST unchanged)
+	Bytes   []byte // raw bytes from pgoutput, for zero-copy encoding paths
 }
 
 // Change represents a single row-level change within a transaction.
