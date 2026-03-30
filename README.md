@@ -59,6 +59,7 @@ See [`config.yaml`](config.yaml) for all available options. Configuration can be
 | `topic` | `toast_strategy` | `omit` | TOAST unchanged handling: `omit` or `sentinel` |
 | `snapshot` | `max_parallel_tables` | `1` | Concurrent table snapshots during initial snapshot |
 | `runtime` | `checkpoint_limit` | `1` | Max in-flight tx batches (`1` = sequential) |
+| `redpanda.topic_auto_create` | `max_message_bytes` | `0` | Optional per-topic `max.message.bytes` set at topic creation |
 
 ## Event Envelope
 

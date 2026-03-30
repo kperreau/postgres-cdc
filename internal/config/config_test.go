@@ -168,4 +168,46 @@ func TestDefaultConfigValues(t *testing.T) {
 	if cfg.Topic.ToastStrategy != ToastOmit {
 		t.Errorf("ToastStrategy = %q, want %q", cfg.Topic.ToastStrategy, ToastOmit)
 	}
+	if cfg.Redpanda.TopicAutoCreate.MaxMessageBytes != 0 {
+		t.Errorf("TopicAutoCreate.MaxMessageBytes = %d, want 0", cfg.Redpanda.TopicAutoCreate.MaxMessageBytes)
+	}
+}
+
+func TestValidateNegativeTopicAutoCreateMaxMessageBytes(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultConfig()
+	cfg.Postgres.User = "test"
+	cfg.Redpanda.TopicAutoCreate.MaxMessageBytes = -1
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for topic_auto_create.max_message_bytes=-1")
+	}
+}
+
+func TestLoadTopicAutoCreateMaxMessageBytesFromYAML(t *testing.T) {
+	t.Parallel()
+
+	content := `
+postgres:
+  user: testuser
+replication:
+  slot_name: my_slot
+  publication_name: my_pub
+redpanda:
+  topic_auto_create:
+    max_message_bytes: 16777216
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Redpanda.TopicAutoCreate.MaxMessageBytes != 16777216 {
+		t.Fatalf("MaxMessageBytes = %d, want 16777216", cfg.Redpanda.TopicAutoCreate.MaxMessageBytes)
+	}
 }

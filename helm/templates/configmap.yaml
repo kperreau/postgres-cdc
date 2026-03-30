@@ -52,6 +52,7 @@ data:
       topic_auto_create:
         partitions: {{ .Values.redpanda.topicAutoCreate.partitions }}
         replication_factor: {{ .Values.redpanda.topicAutoCreate.replicationFactor }}
+        max_message_bytes: {{ .Values.redpanda.topicAutoCreate.maxMessageBytes }}
 
     topic:
       mode: {{ .Values.topic.mode | quote }}

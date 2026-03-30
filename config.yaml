@@ -44,6 +44,9 @@ redpanda:
   topic_auto_create:
     partitions: 3
     replication_factor: 1
+    # max_message_bytes: optional per-topic override applied at creation time.
+    # Use this when Redpanda/Kafka topic defaults are too low for large CDC rows.
+    max_message_bytes: 0
 
 topic:
   mode: per_table

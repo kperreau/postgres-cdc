@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -42,6 +43,7 @@ type Config struct {
 
 	TopicPartitions        int32
 	TopicReplicationFactor int16
+	TopicMaxMessageBytes   int
 }
 
 // Producer wraps a franz-go client for CDC event publishing.
@@ -142,7 +144,15 @@ func (p *Producer) EnsureTopic(ctx context.Context, topic string) error {
 		replFactor = 1
 	}
 
-	resp, err := p.admin.CreateTopics(ctx, p.cfg.TopicPartitions, replFactor, nil, topic)
+	var configs map[string]*string
+	if p.cfg.TopicMaxMessageBytes > 0 {
+		maxMessageBytes := strconv.Itoa(p.cfg.TopicMaxMessageBytes)
+		configs = map[string]*string{
+			"max.message.bytes": &maxMessageBytes,
+		}
+	}
+
+	resp, err := p.admin.CreateTopics(ctx, p.cfg.TopicPartitions, replFactor, configs, topic)
 	if err != nil {
 		return fmt.Errorf("ensure topic %q: %w", topic, err)
 	}

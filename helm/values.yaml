@@ -72,6 +72,9 @@ redpanda:
     # -- Set > 0 to create topics via Admin API before first publish.
     partitions: 3
     replicationFactor: 1
+    # -- Optional topic-level max.message.bytes applied when the topic is created.
+    # Use this when broker defaults are lower than your largest CDC records.
+    maxMessageBytes: 0
 
 # ── Replication slot ──────────────────────────────────────────────────────────
 replication:

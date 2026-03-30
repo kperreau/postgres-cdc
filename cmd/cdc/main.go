@@ -100,6 +100,7 @@ func run() int {
 		BatchMaxRecords:        cfg.Tuning.ProducerBatchMaxRecords,
 		TopicPartitions:        cfg.Redpanda.TopicAutoCreate.Partitions,
 		TopicReplicationFactor: cfg.Redpanda.TopicAutoCreate.ReplicationFactor,
+		TopicMaxMessageBytes:   cfg.Redpanda.TopicAutoCreate.MaxMessageBytes,
 	}, log, &m.CDC)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create producer")

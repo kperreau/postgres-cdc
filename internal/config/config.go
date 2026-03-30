@@ -130,6 +130,7 @@ type RedpandaConfig struct {
 	TopicAutoCreate struct {
 		Partitions        int32 `koanf:"partitions"`
 		ReplicationFactor int16 `koanf:"replication_factor"`
+		MaxMessageBytes   int   `koanf:"max_message_bytes"`
 	} `koanf:"topic_auto_create"`
 }
 
@@ -333,6 +334,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Redpanda.MaxInflight <= 0 {
 		errs = append(errs, errors.New("redpanda: max_inflight must be > 0"))
+	}
+	if c.Redpanda.TopicAutoCreate.MaxMessageBytes < 0 || c.Redpanda.TopicAutoCreate.MaxMessageBytes > 1<<30 {
+		errs = append(errs, errors.New("redpanda: topic_auto_create.max_message_bytes must be between 0 and 1GiB (1<<30)"))
 	}
 
 	// Topic
