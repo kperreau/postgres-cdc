@@ -96,6 +96,7 @@ func New(
 
 // SetReaderConfig updates the reader config (used when wiring is two-phase).
 func (p *Pipeline) SetReaderConfig(cfg pgrepl.ReaderConfig) {
+	cfg.OnSourceConnected = p.health.SetSourceConnected
 	p.readerCfg = cfg
 }
 
@@ -115,7 +116,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	)
 
 	// Create the WAL reader with the txbuffer as its message handler.
-	reader := pgrepl.NewReader(p.readerCfg, buf, p.log, &p.metrics.PG)
+	readerCfg := p.readerCfg
+	readerCfg.OnSourceConnected = p.health.SetSourceConnected
+	reader := pgrepl.NewReader(readerCfg, buf, p.log, &p.metrics.PG)
 
 	// Start checkpoint manager.
 	cpCtx, cpCancel := context.WithCancel(ctx)
@@ -128,7 +131,6 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// Start WAL reader in a goroutine.
 	readerErrCh := make(chan error, 1)
 	go func() {
-		p.health.SetSourceConnected(true)
 		err := reader.Run(ctx)
 		p.health.SetSourceConnected(false)
 		readerErrCh <- err

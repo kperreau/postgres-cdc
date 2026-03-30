@@ -35,6 +35,11 @@ type ReaderConfig struct {
 	// durably checkpointed. If nil, the last-read LSN is used (less safe for
 	// WAL retention under high throughput).
 	ConfirmedLSN func() pglogrepl.LSN
+
+	// OnSourceConnected, if set, is called with true after replication
+	// streaming has started successfully, and with false when the connection
+	// is closed (including before reconnect attempts). Used for readiness probes.
+	OnSourceConnected func(connected bool)
 }
 
 // MessageHandler is called for each parsed WAL message.
@@ -138,6 +143,9 @@ func (r *Reader) connectAndStart(ctx context.Context) error {
 		r.close()
 		return fmt.Errorf("pgrepl start replication: %w", err)
 	}
+	if r.cfg.OnSourceConnected != nil {
+		r.cfg.OnSourceConnected(true)
+	}
 	return nil
 }
 
@@ -160,9 +168,13 @@ func (r *Reader) connect(ctx context.Context) error {
 
 // close shuts down the connection.
 func (r *Reader) close() {
-	if r.conn != nil {
-		_ = r.conn.Close(context.Background())
-		r.conn = nil
+	if r.conn == nil {
+		return
+	}
+	_ = r.conn.Close(context.Background())
+	r.conn = nil
+	if r.cfg.OnSourceConnected != nil {
+		r.cfg.OnSourceConnected(false)
 	}
 }
 

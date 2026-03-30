@@ -21,9 +21,9 @@ import (
 
 // Config holds producer settings.
 type Config struct {
-	Brokers         []string
-	Compression     string
-	Linger          time.Duration
+	Brokers     []string
+	Compression string
+	Linger      time.Duration
 	// MaxInflight is the max produce requests in flight per broker when
 	// EnableIdempotence is false. With idempotence (franz-go default), the
 	// broker limit is fixed at 1; this value still sets MaxBufferedRecords.
