@@ -12,6 +12,7 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -115,11 +116,23 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 	schema, table := parseQualifiedName(qualifiedName)
 	r.log.Info().Str("table", qualifiedName).Msg("starting table snapshot")
 
+	exists, err := r.relationExists(ctx, schema, table)
+	if err != nil {
+		return fmt.Errorf("relation exists: %w", err)
+	}
+	if !exists {
+		r.log.Warn().Str("table", qualifiedName).Msg("relation does not exist; skipping snapshot (remove it from snapshot.tables if you dropped the table)")
+		return nil
+	}
+
 	// Detect PK via a separate catalog query on the pool. If this query errors,
 	// PostgreSQL would abort a snapshot transaction; running it before BeginTx
 	// keeps the snapshot tx usable and we fall back to unordered scan.
 	pkCols, err := r.detectPrimaryKey(ctx, schema, table)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		r.log.Warn().Err(err).Str("table", qualifiedName).Msg("failed to detect primary key; using unordered scan")
 		pkCols = nil
 	}
@@ -143,6 +156,11 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 	}
 
 	if _, err := tx.Exec(ctx, cursorQuery); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			r.log.Warn().Str("table", qualifiedName).Msg("relation does not exist; skipping snapshot (remove it from snapshot.tables if you dropped the table)")
+			return nil
+		}
 		return fmt.Errorf("declare cursor: %w", err)
 	}
 
@@ -230,6 +248,20 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 
 	r.log.Info().Str("table", qualifiedName).Int64("rows", rowCount).Msg("table snapshot done")
 	return nil
+}
+
+// relationExists reports whether a base table or partition is present in pg_catalog.
+func (r *Runner) relationExists(ctx context.Context, schema, table string) (bool, error) {
+	var exists bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = $1 AND c.relname = $2
+			  AND c.relkind IN ('r', 'p')
+		)`, schema, table).Scan(&exists)
+	return exists, err
 }
 
 // detectPrimaryKey queries pg_index to find primary key column names for a table.
