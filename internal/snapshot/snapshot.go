@@ -115,6 +115,15 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 	schema, table := parseQualifiedName(qualifiedName)
 	r.log.Info().Str("table", qualifiedName).Msg("starting table snapshot")
 
+	// Detect PK via a separate catalog query on the pool. If this query errors,
+	// PostgreSQL would abort a snapshot transaction; running it before BeginTx
+	// keeps the snapshot tx usable and we fall back to unordered scan.
+	pkCols, err := r.detectPrimaryKey(ctx, schema, table)
+	if err != nil {
+		r.log.Warn().Err(err).Str("table", qualifiedName).Msg("failed to detect primary key; using unordered scan")
+		pkCols = nil
+	}
+
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{
 		IsoLevel:   pgx.RepeatableRead,
 		AccessMode: pgx.ReadOnly,
@@ -123,13 +132,6 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-
-	// Detect primary key columns for ordered scanning.
-	pkCols, err := r.detectPrimaryKey(ctx, tx, schema, table)
-	if err != nil {
-		r.log.Warn().Err(err).Str("table", qualifiedName).Msg("failed to detect primary key; using unordered scan")
-		pkCols = nil
-	}
 
 	// Build cursor query with optional ORDER BY.
 	tableName := pgx.Identifier{schema, table}.Sanitize()
@@ -232,7 +234,7 @@ func (r *Runner) snapshotTable(ctx context.Context, qualifiedName string) error 
 
 // detectPrimaryKey queries pg_index to find primary key column names for a table.
 // Returns nil if no primary key exists or on error.
-func (r *Runner) detectPrimaryKey(ctx context.Context, tx pgx.Tx, schema, table string) ([]string, error) {
+func (r *Runner) detectPrimaryKey(ctx context.Context, schema, table string) ([]string, error) {
 	const query = `
 		SELECT a.attname
 		FROM pg_index i
@@ -241,7 +243,7 @@ func (r *Runner) detectPrimaryKey(ctx context.Context, tx pgx.Tx, schema, table 
 		  AND i.indisprimary
 		ORDER BY array_position(i.indkey, a.attnum)`
 
-	rows, err := tx.Query(ctx, query, schema, table)
+	rows, err := r.pool.Query(ctx, query, schema, table)
 	if err != nil {
 		return nil, fmt.Errorf("query pg_index: %w", err)
 	}
