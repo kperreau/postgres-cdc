@@ -1,4 +1,7 @@
-.PHONY: build test bench lint clean run update docker-build
+.PHONY: build test bench lint clean run update docker-build docker-push
+
+# Docker Hub (override tag or full ref as needed)
+IMAGE ?= kperreau/postgres-cdc:latest
 
 BINARY := cdc
 PKG := ./...
@@ -30,7 +33,10 @@ update:
 	@go get -u ./...
 
 docker-build:
-	@docker build -t postgres-cdc:latest .
+	@docker build -t $(IMAGE) .
+
+docker-push: docker-build
+	@docker push $(IMAGE)
 
 up:
 	@docker compose -f docker-compose.yaml -p postgres-cdc up -d
