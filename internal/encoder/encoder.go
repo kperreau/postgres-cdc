@@ -8,12 +8,15 @@
 package encoder
 
 import (
+	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/goccy/go-json"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/kperreau/postgres-cdc/internal/model"
 )
@@ -21,7 +24,11 @@ import (
 // ToastSentinelValue is the placeholder used when ToastStrategy is "sentinel".
 const ToastSentinelValue = "__toast_unchanged"
 
-const uuidOID uint32 = 2950
+// PostgreSQL type OIDs for uuid and uuid[].
+const (
+	uuidOID      uint32 = 2950
+	uuidArrayOID uint32 = 2951
+)
 
 // Config holds encoder settings.
 type Config struct {
@@ -154,21 +161,333 @@ func normalizeColumnValue(col model.ColumnValue) any {
 
 	switch col.TypeOID {
 	case uuidOID:
-		switch v := col.Value.(type) {
-		case string:
-			return v
-		case [16]byte:
-			if u, err := uuid.FromBytes(v[:]); err == nil {
-				return u.String()
+		return normalizeUUID(col.Value)
+	case uuidArrayOID:
+		return normalizeUUIDArray(col.Value)
+	}
+
+	// Type-based normalization catches pgtype structs (Interval, Bits, Range,
+	// Multirange) that would otherwise serialize as {"Field": …} objects.
+	// Keyed on the Go concrete type rather than the PG OID so it applies to
+	// every instance regardless of how pgx was configured.
+	return normalizePGType(col.Value)
+}
+
+// normalizePGType walks a value produced by pgx and rewrites the pgtype
+// structs that lack MarshalJSON into their canonical Postgres text form.
+// Arrays ([]any) are recursively normalized element-by-element.
+func normalizePGType(v any) any {
+	switch val := v.(type) {
+	case pgtype.Interval:
+		return formatInterval(val)
+	case pgtype.Bits:
+		return formatBits(val)
+	case pgtype.Range[any]:
+		return formatRange(val)
+	case pgtype.Multirange[pgtype.Range[any]]:
+		return formatMultirange(val)
+	case []any:
+		// Arrays (e.g. _interval, _bit, _tsrange) come through as []any from
+		// pgx's ArrayCodec. Recurse so each element hits the type switch.
+		out := make([]any, len(val))
+		for i, e := range val {
+			out[i] = normalizePGType(e)
+		}
+		return out
+	}
+	return v
+}
+
+// formatInterval renders a pgtype.Interval as an ISO 8601 duration string
+// (e.g. "P1Y2M3DT4H5M6.789S"). ISO 8601 is platform-neutral (no Java-specific
+// encoding like Debezium's MicroDuration) and round-trips through Postgres'
+// own interval text parser.
+//
+// time.Duration is not usable here: interval has variable-length components
+// (months, days) that a fixed-nanosecond duration cannot represent. We build
+// the string directly with strconv.AppendInt on a pre-sized []byte to avoid
+// the fmt package's format-string parsing allocations.
+func formatInterval(iv pgtype.Interval) any {
+	if !iv.Valid {
+		return nil
+	}
+
+	// Worst case: "-P-NNNNY-NNNNM-NNNNDT-NNNNH-NNNNM-NNNN.NNNNNNS" — ~48 bytes.
+	buf := make([]byte, 0, 48)
+	buf = append(buf, 'P')
+
+	months := iv.Months
+	years := months / 12
+	months %= 12
+
+	if years != 0 {
+		buf = strconv.AppendInt(buf, int64(years), 10)
+		buf = append(buf, 'Y')
+	}
+	if months != 0 {
+		buf = strconv.AppendInt(buf, int64(months), 10)
+		buf = append(buf, 'M')
+	}
+	if iv.Days != 0 {
+		buf = strconv.AppendInt(buf, int64(iv.Days), 10)
+		buf = append(buf, 'D')
+	}
+
+	micros := iv.Microseconds
+	if micros != 0 {
+		buf = append(buf, 'T')
+		neg := micros < 0
+		if neg {
+			micros = -micros
+		}
+		hours := micros / 3_600_000_000
+		micros %= 3_600_000_000
+		mins := micros / 60_000_000
+		micros %= 60_000_000
+		secs := micros / 1_000_000
+		frac := micros % 1_000_000
+
+		if hours != 0 {
+			if neg {
+				buf = append(buf, '-')
 			}
-		case []byte:
-			if u, err := uuid.FromBytes(v); err == nil {
-				return u.String()
+			buf = strconv.AppendInt(buf, hours, 10)
+			buf = append(buf, 'H')
+		}
+		if mins != 0 {
+			if neg {
+				buf = append(buf, '-')
 			}
+			buf = strconv.AppendInt(buf, mins, 10)
+			buf = append(buf, 'M')
+		}
+		if secs != 0 || frac != 0 {
+			if neg {
+				buf = append(buf, '-')
+			}
+			buf = strconv.AppendInt(buf, secs, 10)
+			if frac != 0 {
+				buf = appendFracMicros(buf, frac)
+			}
+			buf = append(buf, 'S')
 		}
 	}
 
-	return col.Value
+	if len(buf) == 1 { // only "P" → zero interval
+		return "PT0S"
+	}
+	return string(buf)
+}
+
+// appendFracMicros writes ".NNN" (fractional microseconds, trailing zeros
+// trimmed) onto buf. frac must be in [1, 999_999].
+func appendFracMicros(buf []byte, frac int64) []byte {
+	var digits [6]byte
+	for i := 5; i >= 0; i-- {
+		digits[i] = byte('0' + frac%10)
+		frac /= 10
+	}
+	end := 6
+	for end > 1 && digits[end-1] == '0' {
+		end--
+	}
+	buf = append(buf, '.')
+	return append(buf, digits[:end]...)
+}
+
+// formatBits renders a pgtype.Bits (bit/varbit column) as a string of '0' and
+// '1' characters — the canonical Postgres text representation. Builds the
+// output in a single pre-sized []byte (one allocation: the final string copy).
+func formatBits(bits pgtype.Bits) any {
+	if !bits.Valid {
+		return nil
+	}
+	buf := make([]byte, bits.Len)
+	for i := int32(0); i < bits.Len; i++ {
+		byteIdx := i / 8
+		bitMask := byte(128 >> byte(i%8))
+		if bits.Bytes[byteIdx]&bitMask > 0 {
+			buf[i] = '1'
+		} else {
+			buf[i] = '0'
+		}
+	}
+	return string(buf)
+}
+
+// formatRange renders a pgtype.Range as its Postgres text form:
+// "[lower,upper)", "(,upper]", "empty", etc.
+func formatRange(r pgtype.Range[any]) any {
+	if !r.Valid {
+		return nil
+	}
+	if r.LowerType == pgtype.Empty || r.UpperType == pgtype.Empty {
+		return "empty"
+	}
+	// Cap sized for a typical integer range "[NNNN,NNNN)".
+	buf := make([]byte, 0, 32)
+	buf = appendRange(buf, r)
+	return string(buf)
+}
+
+// formatMultirange renders a pgtype.Multirange as "{range1,range2,…}".
+func formatMultirange(mr pgtype.Multirange[pgtype.Range[any]]) any {
+	if mr.IsNull() {
+		return nil
+	}
+	buf := make([]byte, 0, 2+len(mr)*16)
+	buf = append(buf, '{')
+	for i, r := range mr {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		if r.LowerType == pgtype.Empty || r.UpperType == pgtype.Empty {
+			buf = append(buf, "empty"...)
+			continue
+		}
+		buf = appendRange(buf, r)
+	}
+	buf = append(buf, '}')
+	return string(buf)
+}
+
+// appendRange writes one range literal ("[1,5)", "(,5]", …) into buf. The
+// caller is responsible for Empty / Valid pre-checks.
+func appendRange(buf []byte, r pgtype.Range[any]) []byte {
+	if r.LowerType == pgtype.Inclusive {
+		buf = append(buf, '[')
+	} else {
+		buf = append(buf, '(')
+	}
+	if r.LowerType != pgtype.Unbounded {
+		buf = appendRangeBound(buf, r.Lower)
+	}
+	buf = append(buf, ',')
+	if r.UpperType != pgtype.Unbounded {
+		buf = appendRangeBound(buf, r.Upper)
+	}
+	if r.UpperType == pgtype.Inclusive {
+		buf = append(buf, ']')
+	} else {
+		buf = append(buf, ')')
+	}
+	return buf
+}
+
+// appendRangeBound appends the canonical text form of a range bound. Fast
+// paths for the pgtype element types that pgx's default codecs produce; falls
+// back to json.Marshal + quote stripping for anything exotic.
+func appendRangeBound(buf []byte, v any) []byte {
+	switch b := v.(type) {
+	case nil:
+		return buf
+	case pgtype.Int4:
+		if !b.Valid {
+			return buf
+		}
+		return strconv.AppendInt(buf, int64(b.Int32), 10)
+	case pgtype.Int8:
+		if !b.Valid {
+			return buf
+		}
+		return strconv.AppendInt(buf, b.Int64, 10)
+	case pgtype.Float8:
+		if !b.Valid {
+			return buf
+		}
+		return strconv.AppendFloat(buf, b.Float64, 'g', -1, 64)
+	case pgtype.Date:
+		if !b.Valid {
+			return buf
+		}
+		return b.Time.UTC().AppendFormat(buf, "2006-01-02")
+	case pgtype.Timestamp:
+		if !b.Valid {
+			return buf
+		}
+		return b.Time.UTC().AppendFormat(buf, "2006-01-02T15:04:05.999999999")
+	case pgtype.Timestamptz:
+		if !b.Valid {
+			return buf
+		}
+		return b.Time.UTC().AppendFormat(buf, time.RFC3339Nano)
+	}
+	// Unknown bound type: route through MarshalJSON (covers pgtype.Numeric
+	// and future types) and strip surrounding quotes. One allocation here,
+	// unavoidable without per-type support.
+	out, err := json.Marshal(v)
+	if err != nil {
+		return append(buf, fmt.Sprintf("%v", v)...)
+	}
+	if len(out) >= 2 && out[0] == '"' && out[len(out)-1] == '"' {
+		return append(buf, out[1:len(out)-1]...)
+	}
+	return append(buf, out...)
+}
+
+// normalizeUUID converts a single uuid column value into its canonical string
+// representation (e.g. "f78e7fa7-b11b-4b06-9006-ead00ecde0b9"). This matches
+// the Debezium/Kafka Connect convention (io.debezium.data.Uuid → STRING) so
+// downstream consumers see UUIDs as strings rather than byte arrays.
+func normalizeUUID(v any) any {
+	switch val := v.(type) {
+	case string:
+		return val
+	case [16]byte:
+		u, err := uuid.FromBytes(val[:])
+		if err != nil {
+			return fmt.Sprintf("%v", val)
+		}
+		return u.String()
+	case []byte:
+		if len(val) == 16 {
+			if u, err := uuid.FromBytes(val); err == nil {
+				return u.String()
+			}
+		}
+		// Non-16-byte slice: assume it's already a text representation.
+		return string(val)
+	case fmt.Stringer:
+		// Catches pgtype.UUID, google/uuid.UUID, and other string-convertible
+		// UUID types without hard-coding an import on pgx pgtype.
+		return val.String()
+	}
+	// Unexpected type: fall back to a string representation rather than
+	// letting encoding/json emit a raw byte array like [247,142,…].
+	return fmt.Sprintf("%v", v)
+}
+
+// normalizeUUIDArray converts a uuid[] column value into a slice of canonical
+// strings. Handles the types pgx v5 may surface from rows.Values(): []any
+// (the default path), []string, [][16]byte, and []uuid.UUID.
+func normalizeUUIDArray(v any) any {
+	switch arr := v.(type) {
+	case []string:
+		return arr
+	case []any:
+		out := make([]any, len(arr))
+		for i, elem := range arr {
+			out[i] = normalizeUUID(elem)
+		}
+		return out
+	case [][16]byte:
+		out := make([]string, len(arr))
+		for i, b := range arr {
+			if u, err := uuid.FromBytes(b[:]); err == nil {
+				out[i] = u.String()
+			} else {
+				out[i] = fmt.Sprintf("%v", b)
+			}
+		}
+		return out
+	case []uuid.UUID:
+		out := make([]string, len(arr))
+		for i, u := range arr {
+			out[i] = u.String()
+		}
+		return out
+	}
+	return v
 }
 
 // DeterministicKeyString returns a stable string representation of a key map,
