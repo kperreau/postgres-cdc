@@ -227,13 +227,19 @@ func (r *Reader) readLoop(ctx context.Context) error {
 	defer statusTicker.Stop()
 
 	for {
-		// Process pending standby status updates.
+		// Process pending standby status updates. A send failure means the
+		// underlying connection is no longer usable (e.g. server closed the
+		// socket); return so the outer loop reconnects instead of spinning on
+		// a dead conn until ReceiveMessage eventually notices.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-statusTicker.C:
 			if err := r.sendStandbyStatus(ctx); err != nil {
-				r.log.Warn().Err(err).Msg("failed to send standby status")
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return fmt.Errorf("send standby status: %w", err)
 			}
 		default:
 		}
@@ -255,7 +261,7 @@ func (r *Reader) readLoop(ctx context.Context) error {
 
 		switch msg := rawMsg.(type) {
 		case *pgproto3.CopyData:
-			if err := r.handleCopyData(msg.Data); err != nil {
+			if err := r.handleCopyData(ctx, msg.Data); err != nil {
 				return fmt.Errorf("handle copy data: %w", err)
 			}
 		case *pgproto3.ErrorResponse:
@@ -267,14 +273,14 @@ func (r *Reader) readLoop(ctx context.Context) error {
 }
 
 // handleCopyData dispatches a CopyData payload to the appropriate handler.
-func (r *Reader) handleCopyData(data []byte) error {
+func (r *Reader) handleCopyData(ctx context.Context, data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
 
 	switch data[0] {
 	case pglogrepl.PrimaryKeepaliveMessageByteID:
-		return r.handleKeepalive(data[1:])
+		return r.handleKeepalive(ctx, data[1:])
 	case pglogrepl.XLogDataByteID:
 		return r.handleXLogData(data[1:])
 	default:
@@ -284,13 +290,13 @@ func (r *Reader) handleCopyData(data []byte) error {
 }
 
 // handleKeepalive processes a primary keepalive message.
-func (r *Reader) handleKeepalive(data []byte) error {
+func (r *Reader) handleKeepalive(ctx context.Context, data []byte) error {
 	pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(data)
 	if err != nil {
 		return fmt.Errorf("parse keepalive: %w", err)
 	}
 	if pkm.ReplyRequested {
-		return r.sendStandbyStatus(context.Background())
+		return r.sendStandbyStatus(ctx)
 	}
 	return nil
 }
@@ -454,6 +460,10 @@ func decodeColumnValue(col *pglogrepl.TupleDataColumn) any {
 // have been safely persisted. This is critical for correct crash recovery when
 // the checkpoint lags behind the read position.
 func (r *Reader) sendStandbyStatus(ctx context.Context) error {
+	if r.conn == nil || r.conn.IsClosed() {
+		return errConnClosed
+	}
+
 	// Use the checkpoint LSN for WALFlushPosition when available, so PG only
 	// advances confirmed_flush_lsn (and can only recycle WAL) up to what we've
 	// actually durably stored. Fall back to lastLSN if no callback is set.
@@ -470,3 +480,5 @@ func (r *Reader) sendStandbyStatus(ctx context.Context) error {
 		WALApplyPosition: flushLSN,  // same as flush for our purposes
 	})
 }
+
+var errConnClosed = fmt.Errorf("pgrepl: connection is closed")
