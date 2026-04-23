@@ -15,6 +15,7 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/kperreau/postgres-cdc/internal/model"
 )
@@ -164,7 +165,193 @@ func normalizeColumnValue(col model.ColumnValue) any {
 		return normalizeUUIDArray(col.Value)
 	}
 
-	return col.Value
+	// Type-based normalization catches pgtype structs (Interval, Bits, Range,
+	// Multirange) that would otherwise serialize as {"Field": …} objects.
+	// Keyed on the Go concrete type rather than the PG OID so it applies to
+	// every instance regardless of how pgx was configured.
+	return normalizePGType(col.Value)
+}
+
+// normalizePGType walks a value produced by pgx and rewrites the pgtype
+// structs that lack MarshalJSON into their canonical Postgres text form.
+// Arrays ([]any) are recursively normalized element-by-element.
+func normalizePGType(v any) any {
+	switch val := v.(type) {
+	case pgtype.Interval:
+		return formatInterval(val)
+	case pgtype.Bits:
+		return formatBits(val)
+	case pgtype.Range[any]:
+		return formatRange(val)
+	case pgtype.Multirange[pgtype.Range[any]]:
+		return formatMultirange(val)
+	case []any:
+		// Arrays (e.g. _interval, _bit, _tsrange) come through as []any from
+		// pgx's ArrayCodec. Recurse so each element hits the type switch.
+		out := make([]any, len(val))
+		for i, e := range val {
+			out[i] = normalizePGType(e)
+		}
+		return out
+	}
+	return v
+}
+
+// formatInterval renders a pgtype.Interval as an ISO 8601 duration string
+// (e.g. "P1Y2M3DT4H5M6.789S"). ISO 8601 is platform-neutral (no Java-specific
+// encoding like Debezium's MicroDuration) and round-trips through Postgres'
+// own interval text parser.
+func formatInterval(iv pgtype.Interval) any {
+	if !iv.Valid {
+		return nil
+	}
+
+	var b strings.Builder
+	b.WriteByte('P')
+
+	months := iv.Months
+	years := months / 12
+	months %= 12
+
+	if years != 0 {
+		fmt.Fprintf(&b, "%dY", years)
+	}
+	if months != 0 {
+		fmt.Fprintf(&b, "%dM", months)
+	}
+	if iv.Days != 0 {
+		fmt.Fprintf(&b, "%dD", iv.Days)
+	}
+
+	micros := iv.Microseconds
+	if micros != 0 {
+		b.WriteByte('T')
+		neg := micros < 0
+		if neg {
+			micros = -micros
+		}
+		hours := micros / 3_600_000_000
+		micros %= 3_600_000_000
+		mins := micros / 60_000_000
+		micros %= 60_000_000
+		secs := micros / 1_000_000
+		frac := micros % 1_000_000
+
+		sign := ""
+		if neg {
+			sign = "-"
+		}
+		if hours != 0 {
+			fmt.Fprintf(&b, "%s%dH", sign, hours)
+		}
+		if mins != 0 {
+			fmt.Fprintf(&b, "%s%dM", sign, mins)
+		}
+		if secs != 0 || frac != 0 {
+			if frac != 0 {
+				fracStr := strings.TrimRight(fmt.Sprintf("%06d", frac), "0")
+				fmt.Fprintf(&b, "%s%d.%sS", sign, secs, fracStr)
+			} else {
+				fmt.Fprintf(&b, "%s%dS", sign, secs)
+			}
+		}
+	}
+
+	if b.Len() == 1 { // only "P" → zero interval
+		return "PT0S"
+	}
+	return b.String()
+}
+
+// formatBits renders a pgtype.Bits (bit/varbit column) as a string of '0' and
+// '1' characters — the canonical Postgres text representation.
+func formatBits(bits pgtype.Bits) any {
+	if !bits.Valid {
+		return nil
+	}
+	var b strings.Builder
+	b.Grow(int(bits.Len))
+	for i := int32(0); i < bits.Len; i++ {
+		byteIdx := i / 8
+		bitMask := byte(128 >> byte(i%8))
+		if bits.Bytes[byteIdx]&bitMask > 0 {
+			b.WriteByte('1')
+		} else {
+			b.WriteByte('0')
+		}
+	}
+	return b.String()
+}
+
+// formatRange renders a pgtype.Range as its Postgres text form:
+// "[lower,upper)", "(,upper]", "empty", etc.
+func formatRange(r pgtype.Range[any]) any {
+	if !r.Valid {
+		return nil
+	}
+	if r.LowerType == pgtype.Empty || r.UpperType == pgtype.Empty {
+		return "empty"
+	}
+
+	var b strings.Builder
+	if r.LowerType == pgtype.Inclusive {
+		b.WriteByte('[')
+	} else {
+		b.WriteByte('(')
+	}
+	if r.LowerType != pgtype.Unbounded {
+		b.WriteString(formatRangeBound(r.Lower))
+	}
+	b.WriteByte(',')
+	if r.UpperType != pgtype.Unbounded {
+		b.WriteString(formatRangeBound(r.Upper))
+	}
+	if r.UpperType == pgtype.Inclusive {
+		b.WriteByte(']')
+	} else {
+		b.WriteByte(')')
+	}
+	return b.String()
+}
+
+// formatMultirange renders a pgtype.Multirange as "{range1,range2,…}".
+func formatMultirange(mr pgtype.Multirange[pgtype.Range[any]]) any {
+	if mr.IsNull() {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, r := range mr {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		s, ok := formatRange(r).(string)
+		if !ok {
+			continue
+		}
+		b.WriteString(s)
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+// formatRangeBound renders a range bound value using the element type's
+// canonical string form. pgtype element types (Int4, Int8, Date, Timestamp,
+// Timestamptz, Numeric, Float8) all implement MarshalJSON, so we route
+// through JSON and strip surrounding quotes for string-formatted values.
+func formatRangeBound(v any) string {
+	if v == nil {
+		return ""
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	s := string(b)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
 
 // normalizeUUID converts a single uuid column value into its canonical string

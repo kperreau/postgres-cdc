@@ -2,6 +2,7 @@ package encoder
 
 import (
 	"fmt"
+	"math/big"
 	"sync"
 	"testing"
 	"time"
@@ -678,6 +679,186 @@ func TestEncodeSnapshotPKUUIDKey(t *testing.T) {
 	}
 	if string(key) != fmt.Sprintf(`{"id":"%s"}`, want) {
 		t.Fatalf("pk key = %s, want {\"id\":\"%s\"}", key, want)
+	}
+}
+
+// TestNormalizeInterval covers the pgtype.Interval → ISO 8601 duration path.
+func TestNormalizeInterval(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		iv   pgtype.Interval
+		want any
+	}{
+		{"invalid", pgtype.Interval{Valid: false}, nil},
+		{"zero", pgtype.Interval{Valid: true}, "PT0S"},
+		{"1y2m3d", pgtype.Interval{Months: 14, Days: 3, Valid: true}, "P1Y2M3D"},
+		{"days_only", pgtype.Interval{Days: 7, Valid: true}, "P7D"},
+		{"time_only", pgtype.Interval{Microseconds: 4*3_600_000_000 + 5*60_000_000 + 6*1_000_000, Valid: true}, "PT4H5M6S"},
+		{"fractional_seconds", pgtype.Interval{Microseconds: 6_789_000, Valid: true}, "PT6.789S"},
+		{"negative_micros", pgtype.Interval{Microseconds: -3_600_000_000, Valid: true}, "PT-1H"},
+		{"mixed", pgtype.Interval{Months: 14, Days: 3, Microseconds: 14_706_789_000, Valid: true}, "P1Y2M3DT4H5M6.789S"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			col := model.ColumnValue{Name: "dur", TypeOID: 1186, Value: tc.iv}
+			got := normalizeColumnValue(col)
+			if got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeBits covers the pgtype.Bits → bitstring path.
+func TestNormalizeBits(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   pgtype.Bits
+		want any
+	}{
+		{"invalid", pgtype.Bits{Valid: false}, nil},
+		{"single_byte_full", pgtype.Bits{Bytes: []byte{0xB5}, Len: 8, Valid: true}, "10110101"},
+		{"partial_bits", pgtype.Bits{Bytes: []byte{0xA0}, Len: 4, Valid: true}, "1010"},
+		{"multi_byte", pgtype.Bits{Bytes: []byte{0xFF, 0x00}, Len: 12, Valid: true}, "111111110000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			col := model.ColumnValue{Name: "b", TypeOID: 1560, Value: tc.in}
+			got := normalizeColumnValue(col)
+			if got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeRange covers pgtype.Range[any] → "[lo,hi)" notation for the
+// common range types. The bound values mimic what pgx surfaces via
+// rows.Values() — concrete pgtype.* structs with MarshalJSON support.
+func TestNormalizeRange(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		r    pgtype.Range[any]
+		want any
+	}{
+		{
+			"invalid",
+			pgtype.Range[any]{Valid: false},
+			nil,
+		},
+		{
+			"empty",
+			pgtype.Range[any]{LowerType: pgtype.Empty, UpperType: pgtype.Empty, Valid: true},
+			"empty",
+		},
+		{
+			"int4_inclusive_exclusive",
+			pgtype.Range[any]{
+				Lower:     pgtype.Int4{Int32: 1, Valid: true},
+				Upper:     pgtype.Int4{Int32: 10, Valid: true},
+				LowerType: pgtype.Inclusive,
+				UpperType: pgtype.Exclusive,
+				Valid:     true,
+			},
+			"[1,10)",
+		},
+		{
+			"unbounded_lower",
+			pgtype.Range[any]{
+				Upper:     pgtype.Int4{Int32: 5, Valid: true},
+				LowerType: pgtype.Unbounded,
+				UpperType: pgtype.Exclusive,
+				Valid:     true,
+			},
+			"(,5)",
+		},
+		{
+			"date_range",
+			pgtype.Range[any]{
+				Lower:     pgtype.Date{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+				Upper:     pgtype.Date{Time: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+				LowerType: pgtype.Inclusive,
+				UpperType: pgtype.Exclusive,
+				Valid:     true,
+			},
+			"[2026-01-01,2026-02-01)",
+		},
+		{
+			"numeric_range",
+			pgtype.Range[any]{
+				Lower:     pgtype.Numeric{Int: big.NewInt(125), Exp: -1, Valid: true}, // 12.5
+				Upper:     pgtype.Numeric{Int: big.NewInt(200), Exp: -1, Valid: true}, // 20.0
+				LowerType: pgtype.Inclusive,
+				UpperType: pgtype.Inclusive,
+				Valid:     true,
+			},
+			"[12.5,20.0]",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			col := model.ColumnValue{Name: "r", TypeOID: 3904, Value: tc.r}
+			got := normalizeColumnValue(col)
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeMultirange covers pgtype.Multirange → "{[a,b),[c,d)}".
+func TestNormalizeMultirange(t *testing.T) {
+	t.Parallel()
+
+	mkRange := func(lo, hi int32) pgtype.Range[any] {
+		return pgtype.Range[any]{
+			Lower:     pgtype.Int4{Int32: lo, Valid: true},
+			Upper:     pgtype.Int4{Int32: hi, Valid: true},
+			LowerType: pgtype.Inclusive,
+			UpperType: pgtype.Exclusive,
+			Valid:     true,
+		}
+	}
+
+	cases := []struct {
+		name string
+		mr   pgtype.Multirange[pgtype.Range[any]]
+		want any
+	}{
+		{"null", nil, nil},
+		{"empty_slice", pgtype.Multirange[pgtype.Range[any]]{}, "{}"},
+		{"two_ranges", pgtype.Multirange[pgtype.Range[any]]{mkRange(1, 5), mkRange(10, 15)}, "{[1,5),[10,15)}"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			col := model.ColumnValue{Name: "mr", TypeOID: 4451, Value: tc.mr}
+			got := normalizeColumnValue(col)
+			if got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeIntervalArray verifies _interval arrays (surfaced as []any of
+// pgtype.Interval by ArrayCodec) are recursively normalized.
+func TestNormalizeIntervalArray(t *testing.T) {
+	t.Parallel()
+	arr := []any{
+		pgtype.Interval{Months: 1, Valid: true},
+		pgtype.Interval{Days: 2, Valid: true},
+	}
+	col := model.ColumnValue{Name: "ds", TypeOID: 1187, Value: arr}
+	got := normalizeColumnValue(col)
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `["P1M","P2D"]` {
+		t.Fatalf("interval array = %s, want [\"P1M\",\"P2D\"]", raw)
 	}
 }
 
