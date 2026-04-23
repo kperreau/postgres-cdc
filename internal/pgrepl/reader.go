@@ -84,44 +84,42 @@ func NewReader(cfg ReaderConfig, handler MessageHandler, log zerolog.Logger, m *
 // Transient connection failures trigger exponential backoff reconnects.
 func (r *Reader) Run(ctx context.Context) error {
 	for {
-		err := r.runOnce(ctx)
+		if err := r.connectWithBackoff(ctx); err != nil {
+			return err
+		}
+
+		err := r.readLoop(ctx)
+		r.close()
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		// Reconnect with exponential backoff.
 		r.metrics.ReconnectsTotal.Inc()
 		r.log.Warn().Err(err).Msg("replication connection lost; reconnecting")
-
-		bo := backoff.NewExponentialBackOff()
-		bo.InitialInterval = 500 * time.Millisecond
-		bo.MaxInterval = 30 * time.Second
-
-		_, reconnErr := backoff.Retry(ctx, func() (struct{}, error) {
-			if err := r.connectAndStart(ctx); err != nil {
-				r.log.Warn().Err(err).Msg("reconnect attempt failed")
-				return struct{}{}, err
-			}
-			return struct{}{}, nil
-		},
-			backoff.WithBackOff(bo),
-			backoff.WithMaxElapsedTime(0), // retry indefinitely until ctx cancelled
-		)
-
-		if reconnErr != nil {
-			return fmt.Errorf("pgrepl reconnect: %w", reconnErr)
-		}
-		r.log.Info().Msg("reconnected to PostgreSQL replication")
 	}
 }
 
-// runOnce performs a single connect → stream cycle. Returns on any error.
-func (r *Reader) runOnce(ctx context.Context) error {
-	if err := r.connectAndStart(ctx); err != nil {
-		return err
+// connectWithBackoff (re)establishes the replication stream, retrying with
+// exponential backoff until it succeeds or ctx is cancelled.
+func (r *Reader) connectWithBackoff(ctx context.Context) error {
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 500 * time.Millisecond
+	bo.MaxInterval = 30 * time.Second
+
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
+		if err := r.connectAndStart(ctx); err != nil {
+			r.log.Warn().Err(err).Msg("connect attempt failed")
+			return struct{}{}, err
+		}
+		return struct{}{}, nil
+	},
+		backoff.WithBackOff(bo),
+		backoff.WithMaxElapsedTime(0), // retry indefinitely until ctx cancelled
+	)
+	if err != nil {
+		return fmt.Errorf("pgrepl connect: %w", err)
 	}
-	defer r.close()
-	return r.readLoop(ctx)
+	return nil
 }
 
 // connectAndStart establishes the connection, ensures the slot, and starts replication.
@@ -252,7 +250,13 @@ func (r *Reader) readLoop(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			// Receive timeout — not a real error, loop back for status tick.
+			// If the underlying conn is dead, surface the error so the outer
+			// loop reconnects — don't keep spinning on a closed socket even if
+			// ReceiveMessage happened to return a deadline-shaped error.
+			if r.conn.IsClosed() {
+				return fmt.Errorf("receive message: connection closed: %w", err)
+			}
+			// Receive timeout on a healthy conn — loop back for status tick.
 			if receiveCtx.Err() != nil {
 				continue
 			}
@@ -342,7 +346,7 @@ func (r *Reader) parseWALMessage(data []byte, walStart pglogrepl.LSN) error {
 		oldCols := r.decodeColumns(msg.RelationID, msg.OldTuple)
 		return r.handler.OnDelete(msg.RelationID, oldCols, walStart)
 	case *pglogrepl.TruncateMessageV2:
-		r.log.Warn().Msg("TRUNCATE message received; not propagated")
+		r.log.Debug().Msg("TRUNCATE message received; not propagated")
 		return nil
 	case *pglogrepl.TypeMessageV2:
 		return nil // type messages are informational
