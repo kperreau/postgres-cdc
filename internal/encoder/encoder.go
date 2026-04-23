@@ -10,6 +10,7 @@ package encoder
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -201,31 +202,40 @@ func normalizePGType(v any) any {
 // (e.g. "P1Y2M3DT4H5M6.789S"). ISO 8601 is platform-neutral (no Java-specific
 // encoding like Debezium's MicroDuration) and round-trips through Postgres'
 // own interval text parser.
+//
+// time.Duration is not usable here: interval has variable-length components
+// (months, days) that a fixed-nanosecond duration cannot represent. We build
+// the string directly with strconv.AppendInt on a pre-sized []byte to avoid
+// the fmt package's format-string parsing allocations.
 func formatInterval(iv pgtype.Interval) any {
 	if !iv.Valid {
 		return nil
 	}
 
-	var b strings.Builder
-	b.WriteByte('P')
+	// Worst case: "-P-NNNNY-NNNNM-NNNNDT-NNNNH-NNNNM-NNNN.NNNNNNS" — ~48 bytes.
+	buf := make([]byte, 0, 48)
+	buf = append(buf, 'P')
 
 	months := iv.Months
 	years := months / 12
 	months %= 12
 
 	if years != 0 {
-		fmt.Fprintf(&b, "%dY", years)
+		buf = strconv.AppendInt(buf, int64(years), 10)
+		buf = append(buf, 'Y')
 	}
 	if months != 0 {
-		fmt.Fprintf(&b, "%dM", months)
+		buf = strconv.AppendInt(buf, int64(months), 10)
+		buf = append(buf, 'M')
 	}
 	if iv.Days != 0 {
-		fmt.Fprintf(&b, "%dD", iv.Days)
+		buf = strconv.AppendInt(buf, int64(iv.Days), 10)
+		buf = append(buf, 'D')
 	}
 
 	micros := iv.Microseconds
 	if micros != 0 {
-		b.WriteByte('T')
+		buf = append(buf, 'T')
 		neg := micros < 0
 		if neg {
 			micros = -micros
@@ -237,50 +247,72 @@ func formatInterval(iv pgtype.Interval) any {
 		secs := micros / 1_000_000
 		frac := micros % 1_000_000
 
-		sign := ""
-		if neg {
-			sign = "-"
-		}
 		if hours != 0 {
-			fmt.Fprintf(&b, "%s%dH", sign, hours)
+			if neg {
+				buf = append(buf, '-')
+			}
+			buf = strconv.AppendInt(buf, hours, 10)
+			buf = append(buf, 'H')
 		}
 		if mins != 0 {
-			fmt.Fprintf(&b, "%s%dM", sign, mins)
+			if neg {
+				buf = append(buf, '-')
+			}
+			buf = strconv.AppendInt(buf, mins, 10)
+			buf = append(buf, 'M')
 		}
 		if secs != 0 || frac != 0 {
-			if frac != 0 {
-				fracStr := strings.TrimRight(fmt.Sprintf("%06d", frac), "0")
-				fmt.Fprintf(&b, "%s%d.%sS", sign, secs, fracStr)
-			} else {
-				fmt.Fprintf(&b, "%s%dS", sign, secs)
+			if neg {
+				buf = append(buf, '-')
 			}
+			buf = strconv.AppendInt(buf, secs, 10)
+			if frac != 0 {
+				buf = appendFracMicros(buf, frac)
+			}
+			buf = append(buf, 'S')
 		}
 	}
 
-	if b.Len() == 1 { // only "P" → zero interval
+	if len(buf) == 1 { // only "P" → zero interval
 		return "PT0S"
 	}
-	return b.String()
+	return string(buf)
+}
+
+// appendFracMicros writes ".NNN" (fractional microseconds, trailing zeros
+// trimmed) onto buf. frac must be in [1, 999_999].
+func appendFracMicros(buf []byte, frac int64) []byte {
+	var digits [6]byte
+	for i := 5; i >= 0; i-- {
+		digits[i] = byte('0' + frac%10)
+		frac /= 10
+	}
+	end := 6
+	for end > 1 && digits[end-1] == '0' {
+		end--
+	}
+	buf = append(buf, '.')
+	return append(buf, digits[:end]...)
 }
 
 // formatBits renders a pgtype.Bits (bit/varbit column) as a string of '0' and
-// '1' characters — the canonical Postgres text representation.
+// '1' characters — the canonical Postgres text representation. Builds the
+// output in a single pre-sized []byte (one allocation: the final string copy).
 func formatBits(bits pgtype.Bits) any {
 	if !bits.Valid {
 		return nil
 	}
-	var b strings.Builder
-	b.Grow(int(bits.Len))
+	buf := make([]byte, bits.Len)
 	for i := int32(0); i < bits.Len; i++ {
 		byteIdx := i / 8
 		bitMask := byte(128 >> byte(i%8))
 		if bits.Bytes[byteIdx]&bitMask > 0 {
-			b.WriteByte('1')
+			buf[i] = '1'
 		} else {
-			b.WriteByte('0')
+			buf[i] = '0'
 		}
 	}
-	return b.String()
+	return string(buf)
 }
 
 // formatRange renders a pgtype.Range as its Postgres text form:
@@ -292,26 +324,10 @@ func formatRange(r pgtype.Range[any]) any {
 	if r.LowerType == pgtype.Empty || r.UpperType == pgtype.Empty {
 		return "empty"
 	}
-
-	var b strings.Builder
-	if r.LowerType == pgtype.Inclusive {
-		b.WriteByte('[')
-	} else {
-		b.WriteByte('(')
-	}
-	if r.LowerType != pgtype.Unbounded {
-		b.WriteString(formatRangeBound(r.Lower))
-	}
-	b.WriteByte(',')
-	if r.UpperType != pgtype.Unbounded {
-		b.WriteString(formatRangeBound(r.Upper))
-	}
-	if r.UpperType == pgtype.Inclusive {
-		b.WriteByte(']')
-	} else {
-		b.WriteByte(')')
-	}
-	return b.String()
+	// Cap sized for a typical integer range "[NNNN,NNNN)".
+	buf := make([]byte, 0, 32)
+	buf = appendRange(buf, r)
+	return string(buf)
 }
 
 // formatMultirange renders a pgtype.Multirange as "{range1,range2,…}".
@@ -319,39 +335,94 @@ func formatMultirange(mr pgtype.Multirange[pgtype.Range[any]]) any {
 	if mr.IsNull() {
 		return nil
 	}
-	var b strings.Builder
-	b.WriteByte('{')
+	buf := make([]byte, 0, 2+len(mr)*16)
+	buf = append(buf, '{')
 	for i, r := range mr {
 		if i > 0 {
-			b.WriteByte(',')
+			buf = append(buf, ',')
 		}
-		s, ok := formatRange(r).(string)
-		if !ok {
+		if r.LowerType == pgtype.Empty || r.UpperType == pgtype.Empty {
+			buf = append(buf, "empty"...)
 			continue
 		}
-		b.WriteString(s)
+		buf = appendRange(buf, r)
 	}
-	b.WriteByte('}')
-	return b.String()
+	buf = append(buf, '}')
+	return string(buf)
 }
 
-// formatRangeBound renders a range bound value using the element type's
-// canonical string form. pgtype element types (Int4, Int8, Date, Timestamp,
-// Timestamptz, Numeric, Float8) all implement MarshalJSON, so we route
-// through JSON and strip surrounding quotes for string-formatted values.
-func formatRangeBound(v any) string {
-	if v == nil {
-		return ""
+// appendRange writes one range literal ("[1,5)", "(,5]", …) into buf. The
+// caller is responsible for Empty / Valid pre-checks.
+func appendRange(buf []byte, r pgtype.Range[any]) []byte {
+	if r.LowerType == pgtype.Inclusive {
+		buf = append(buf, '[')
+	} else {
+		buf = append(buf, '(')
 	}
-	b, err := json.Marshal(v)
+	if r.LowerType != pgtype.Unbounded {
+		buf = appendRangeBound(buf, r.Lower)
+	}
+	buf = append(buf, ',')
+	if r.UpperType != pgtype.Unbounded {
+		buf = appendRangeBound(buf, r.Upper)
+	}
+	if r.UpperType == pgtype.Inclusive {
+		buf = append(buf, ']')
+	} else {
+		buf = append(buf, ')')
+	}
+	return buf
+}
+
+// appendRangeBound appends the canonical text form of a range bound. Fast
+// paths for the pgtype element types that pgx's default codecs produce; falls
+// back to json.Marshal + quote stripping for anything exotic.
+func appendRangeBound(buf []byte, v any) []byte {
+	switch b := v.(type) {
+	case nil:
+		return buf
+	case pgtype.Int4:
+		if !b.Valid {
+			return buf
+		}
+		return strconv.AppendInt(buf, int64(b.Int32), 10)
+	case pgtype.Int8:
+		if !b.Valid {
+			return buf
+		}
+		return strconv.AppendInt(buf, b.Int64, 10)
+	case pgtype.Float8:
+		if !b.Valid {
+			return buf
+		}
+		return strconv.AppendFloat(buf, b.Float64, 'g', -1, 64)
+	case pgtype.Date:
+		if !b.Valid {
+			return buf
+		}
+		return b.Time.UTC().AppendFormat(buf, "2006-01-02")
+	case pgtype.Timestamp:
+		if !b.Valid {
+			return buf
+		}
+		return b.Time.UTC().AppendFormat(buf, "2006-01-02T15:04:05.999999999")
+	case pgtype.Timestamptz:
+		if !b.Valid {
+			return buf
+		}
+		return b.Time.UTC().AppendFormat(buf, time.RFC3339Nano)
+	}
+	// Unknown bound type: route through MarshalJSON (covers pgtype.Numeric
+	// and future types) and strip surrounding quotes. One allocation here,
+	// unavoidable without per-type support.
+	out, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Sprintf("%v", v)
+		return append(buf, fmt.Sprintf("%v", v)...)
 	}
-	s := string(b)
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		return s[1 : len(s)-1]
+	if len(out) >= 2 && out[0] == '"' && out[len(out)-1] == '"' {
+		return append(buf, out[1:len(out)-1]...)
 	}
-	return s
+	return append(buf, out...)
 }
 
 // normalizeUUID converts a single uuid column value into its canonical string

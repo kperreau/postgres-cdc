@@ -862,6 +862,75 @@ func TestNormalizeIntervalArray(t *testing.T) {
 	}
 }
 
+func BenchmarkNormalizeInterval(b *testing.B) {
+	col := model.ColumnValue{Name: "dur", TypeOID: 1186, Value: pgtype.Interval{
+		Months: 14, Days: 3, Microseconds: 14_706_789_000, Valid: true,
+	}}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = normalizeColumnValue(col)
+	}
+}
+
+func BenchmarkNormalizeBits(b *testing.B) {
+	col := model.ColumnValue{Name: "b", TypeOID: 1560, Value: pgtype.Bits{
+		Bytes: []byte{0xB5, 0xA0}, Len: 12, Valid: true,
+	}}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = normalizeColumnValue(col)
+	}
+}
+
+func BenchmarkNormalizeRangeInt4(b *testing.B) {
+	col := model.ColumnValue{Name: "r", TypeOID: 3904, Value: pgtype.Range[any]{
+		Lower:     pgtype.Int4{Int32: 1, Valid: true},
+		Upper:     pgtype.Int4{Int32: 1000, Valid: true},
+		LowerType: pgtype.Inclusive,
+		UpperType: pgtype.Exclusive,
+		Valid:     true,
+	}}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = normalizeColumnValue(col)
+	}
+}
+
+func BenchmarkNormalizeRangeTstz(b *testing.B) {
+	col := model.ColumnValue{Name: "r", TypeOID: 3910, Value: pgtype.Range[any]{
+		Lower:     pgtype.Timestamptz{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+		Upper:     pgtype.Timestamptz{Time: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+		LowerType: pgtype.Inclusive,
+		UpperType: pgtype.Exclusive,
+		Valid:     true,
+	}}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = normalizeColumnValue(col)
+	}
+}
+
+func BenchmarkNormalizeUUID(b *testing.B) {
+	col := model.ColumnValue{Name: "id", TypeOID: uuidOID, Value: [16]byte{
+		0xf7, 0x8e, 0x7f, 0xa7, 0xb1, 0x1b, 0x4b, 0x06, 0x90, 0x06, 0xea, 0xd0, 0x0e, 0xcd, 0xe0, 0xb9,
+	}}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = normalizeColumnValue(col)
+	}
+}
+
+// BenchmarkNormalizeStringPassthrough measures the cost of the hot path when
+// the column is a non-exotic type (typical CDC traffic). This should be
+// effectively free — one type-switch miss.
+func BenchmarkNormalizeStringPassthrough(b *testing.B) {
+	col := model.ColumnValue{Name: "s", TypeOID: 25, Value: "hello world"}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = normalizeColumnValue(col)
+	}
+}
+
 func BenchmarkEncode(b *testing.B) {
 	enc := New(Config{SourceName: "pg-main", Database: "app"})
 	rel := &model.Relation{
