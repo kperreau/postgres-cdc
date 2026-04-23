@@ -8,6 +8,7 @@
 package encoder
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -21,7 +22,11 @@ import (
 // ToastSentinelValue is the placeholder used when ToastStrategy is "sentinel".
 const ToastSentinelValue = "__toast_unchanged"
 
-const uuidOID uint32 = 2950
+// PostgreSQL type OIDs for uuid and uuid[].
+const (
+	uuidOID      uint32 = 2950
+	uuidArrayOID uint32 = 2951
+)
 
 // Config holds encoder settings.
 type Config struct {
@@ -154,21 +159,77 @@ func normalizeColumnValue(col model.ColumnValue) any {
 
 	switch col.TypeOID {
 	case uuidOID:
-		switch v := col.Value.(type) {
-		case string:
-			return v
-		case [16]byte:
-			if u, err := uuid.FromBytes(v[:]); err == nil {
-				return u.String()
-			}
-		case []byte:
-			if u, err := uuid.FromBytes(v); err == nil {
-				return u.String()
-			}
-		}
+		return normalizeUUID(col.Value)
+	case uuidArrayOID:
+		return normalizeUUIDArray(col.Value)
 	}
 
 	return col.Value
+}
+
+// normalizeUUID converts a single uuid column value into its canonical string
+// representation (e.g. "f78e7fa7-b11b-4b06-9006-ead00ecde0b9"). This matches
+// the Debezium/Kafka Connect convention (io.debezium.data.Uuid → STRING) so
+// downstream consumers see UUIDs as strings rather than byte arrays.
+func normalizeUUID(v any) any {
+	switch val := v.(type) {
+	case string:
+		return val
+	case [16]byte:
+		u, err := uuid.FromBytes(val[:])
+		if err != nil {
+			return fmt.Sprintf("%v", val)
+		}
+		return u.String()
+	case []byte:
+		if len(val) == 16 {
+			if u, err := uuid.FromBytes(val); err == nil {
+				return u.String()
+			}
+		}
+		// Non-16-byte slice: assume it's already a text representation.
+		return string(val)
+	case fmt.Stringer:
+		// Catches pgtype.UUID, google/uuid.UUID, and other string-convertible
+		// UUID types without hard-coding an import on pgx pgtype.
+		return val.String()
+	}
+	// Unexpected type: fall back to a string representation rather than
+	// letting encoding/json emit a raw byte array like [247,142,…].
+	return fmt.Sprintf("%v", v)
+}
+
+// normalizeUUIDArray converts a uuid[] column value into a slice of canonical
+// strings. Handles the types pgx v5 may surface from rows.Values(): []any
+// (the default path), []string, [][16]byte, and []uuid.UUID.
+func normalizeUUIDArray(v any) any {
+	switch arr := v.(type) {
+	case []string:
+		return arr
+	case []any:
+		out := make([]any, len(arr))
+		for i, elem := range arr {
+			out[i] = normalizeUUID(elem)
+		}
+		return out
+	case [][16]byte:
+		out := make([]string, len(arr))
+		for i, b := range arr {
+			if u, err := uuid.FromBytes(b[:]); err == nil {
+				out[i] = u.String()
+			} else {
+				out[i] = fmt.Sprintf("%v", b)
+			}
+		}
+		return out
+	case []uuid.UUID:
+		out := make([]string, len(arr))
+		for i, u := range arr {
+			out[i] = u.String()
+		}
+		return out
+	}
+	return v
 }
 
 // DeterministicKeyString returns a stable string representation of a key map,

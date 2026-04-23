@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
+	"github.com/google/uuid"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/kperreau/postgres-cdc/internal/model"
 )
@@ -573,6 +575,109 @@ func TestDeterministicKeyStringMultipleTypes(t *testing.T) {
 	want := `active=true|age=30|name="alice"`
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestNormalizeUUIDCanonicalString exercises every UUID value shape that the
+// snapshot or WAL paths may surface, to guarantee the encoder always emits the
+// canonical 36-char string (Debezium / Kafka Connect convention).
+func TestNormalizeUUIDCanonicalString(t *testing.T) {
+	t.Parallel()
+	want := "54f51137-d3fb-45a0-bede-dee0945f959a"
+	raw := [16]byte{0x54, 0xf5, 0x11, 0x37, 0xd3, 0xfb, 0x45, 0xa0, 0xbe, 0xde, 0xde, 0xe0, 0x94, 0x5f, 0x95, 0x9a}
+
+	cases := []struct {
+		name  string
+		value any
+	}{
+		{"string", want},
+		{"[16]byte", raw},
+		{"[]byte", raw[:]},
+		{"google/uuid.UUID", uuid.UUID(raw)},
+		{"pgtype.UUID", pgtype.UUID{Bytes: raw, Valid: true}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			col := model.ColumnValue{Name: "id", TypeOID: uuidOID, Value: tc.value}
+			got := normalizeColumnValue(col)
+			if got != want {
+				t.Fatalf("got %v (%T), want %q", got, got, want)
+			}
+		})
+	}
+}
+
+// TestNormalizeUUIDArray verifies uuid[] columns (OID 2951) are emitted as a
+// slice of canonical strings, not a slice of byte arrays.
+func TestNormalizeUUIDArray(t *testing.T) {
+	t.Parallel()
+	a := [16]byte{0x54, 0xf5, 0x11, 0x37, 0xd3, 0xfb, 0x45, 0xa0, 0xbe, 0xde, 0xde, 0xe0, 0x94, 0x5f, 0x95, 0x9a}
+	b := [16]byte{0x08, 0xa1, 0xac, 0x39, 0x5f, 0x94, 0x41, 0xfb, 0x97, 0xf9, 0xee, 0x51, 0x71, 0x8a, 0xbd, 0x2a}
+	wantA := "54f51137-d3fb-45a0-bede-dee0945f959a"
+	wantB := "08a1ac39-5f94-41fb-97f9-ee51718abd2a"
+
+	cases := []struct {
+		name  string
+		value any
+		want  []any
+	}{
+		{"[]any of [16]byte", []any{a, b}, []any{wantA, wantB}},
+		{"[]any of string", []any{wantA, wantB}, []any{wantA, wantB}},
+		{"[][16]byte", [][16]byte{a, b}, nil}, // handled below (returns []string)
+		{"[]uuid.UUID", []uuid.UUID{uuid.UUID(a), uuid.UUID(b)}, nil},
+		{"[]string", []string{wantA, wantB}, nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			col := model.ColumnValue{Name: "ids", TypeOID: uuidArrayOID, Value: tc.value}
+			got := normalizeColumnValue(col)
+
+			// Serialize through JSON to validate the wire format regardless of
+			// the concrete Go slice type.
+			raw, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			expected := fmt.Sprintf(`["%s","%s"]`, wantA, wantB)
+			if string(raw) != expected {
+				t.Fatalf("uuid[] wire format = %s, want %s", raw, expected)
+			}
+		})
+	}
+}
+
+// TestEncodeSnapshotPKUUIDKey is the end-to-end check for Debezium parity: a
+// snapshot row whose PK is a [16]byte UUID must produce a Kafka key with the
+// canonical string, not a byte array.
+func TestEncodeSnapshotPKUUIDKey(t *testing.T) {
+	t.Parallel()
+	enc := New(Config{SourceName: "pg-main", Database: "app"})
+	raw := [16]byte{0xf7, 0x8e, 0x7f, 0xa7, 0xb1, 0x1b, 0x4b, 0x06, 0x90, 0x06, 0xea, 0xd0, 0x0e, 0xcd, 0xe0, 0xb9}
+	want := "f78e7fa7-b11b-4b06-9006-ead00ecde0b9"
+
+	ev := &model.TxEvent{
+		Change: model.Change{
+			Op: model.OpSnapshot,
+			Relation: &model.Relation{
+				Namespace: "public",
+				Name:      "orders",
+				Columns:   []model.Column{{Name: "id", TypeOID: uuidOID, IsKey: true}},
+				KeyCols:   []int{0},
+			},
+			After: []model.ColumnValue{{Name: "id", TypeOID: uuidOID, Value: raw}},
+			LSN:   0xA00,
+		},
+		CommitTS: time.Now(),
+	}
+
+	_, _, key, _, err := enc.Encode(ev, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(key) != fmt.Sprintf(`{"id":"%s"}`, want) {
+		t.Fatalf("pk key = %s, want {\"id\":\"%s\"}", key, want)
 	}
 }
 
